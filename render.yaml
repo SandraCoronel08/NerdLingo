@@ -1,0 +1,10 @@
+services:
+  - type: web
+    runtime: node
+    name: nerdlingo-server
+    buildCommand: npm install && npm run build --workspace @nerdlingo/server
+    startCommand: npm run start --workspace @nerdlingo/server
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
