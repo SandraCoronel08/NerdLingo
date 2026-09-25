@@ -28,9 +28,45 @@ const liveTranslateModel = "gemini-3.5-live-translate-preview";
 const liveTranslateChunkBytes = 3_840;
 const allowedSessionIds = ["stage-1", "stage-2"];
 const allowedSessionIdSet = new Set(allowedSessionIds);
-const activeProducers = new Map<string, string>();
+type ProducerOwner = {
+  connectionId: string;
+  socket: WebSocket;
+  reservedAt: number;
+};
+
+const activeProducers = new Map<string, ProducerOwner>();
 const publicSessions = new PublicSessionState(allowedSessionIds);
 let shuttingDown = false;
+
+function readyStateName(readyState: number) {
+  switch (readyState) {
+    case WebSocket.CONNECTING:
+      return "CONNECTING";
+    case WebSocket.OPEN:
+      return "OPEN";
+    case WebSocket.CLOSING:
+      return "CLOSING";
+    case WebSocket.CLOSED:
+      return "CLOSED";
+    default:
+      return `UNKNOWN(${readyState})`;
+  }
+}
+
+function releaseProducer(sessionId: string, connectionId: string, reason: string) {
+  const owner = activeProducers.get(sessionId);
+  if (!owner || owner.connectionId !== connectionId) return false;
+
+  activeProducers.delete(sessionId);
+  publicSessions.setStatus(sessionId, "offline");
+  console.log(`[${sessionId}] producer released`, {
+    connectionId,
+    reason,
+    reservedAt: new Date(owner.reservedAt).toISOString(),
+    releasedAt: new Date().toISOString(),
+  });
+  return true;
+}
 
 type OperatorMessage =
   | { type: "gemini.connecting" }
@@ -420,6 +456,13 @@ audioServer.on("connection", (socket, request) => {
     }
   };
 
+  const abandonProducer = (reason: string) => {
+    audioInputStopped = true;
+    releaseProducer(sessionId, connectionId, reason);
+    closeGeminiSession();
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close(1011, reason);
+  };
+
   const openLiveTranslateSession = async () => {
     if (geminiSessionPromise) return geminiSessionPromise;
 
@@ -492,6 +535,7 @@ audioServer.on("connection", (socket, request) => {
           const message = "Gemini Live Translate encountered a connection error.";
           console.warn(`[audio ${id}] ${message}`, { error: error.message });
           sendToOperator({ type: "liveTranslate.error", message });
+          if (!geminiClosing) abandonProducer("Gemini Live Translate error");
         },
         onclose: (event) => {
           console.log(`[audio ${id}] Gemini Live Translate closed`, { code: event.code, reason: event.reason });
@@ -499,6 +543,7 @@ audioServer.on("connection", (socket, request) => {
             const message = "Gemini Live Translate closed unexpectedly.";
             console.warn(`[audio ${id}] ${message}`);
             sendToOperator({ type: "liveTranslate.error", message });
+            abandonProducer("Gemini Live Translate closed unexpectedly");
           }
         },
       },
@@ -569,12 +614,14 @@ audioServer.on("connection", (socket, request) => {
           const message = "Gemini Live encountered a connection error.";
           console.warn(`[audio ${id}] ${message}`);
           sendToOperator({ type: "gemini.error", message });
+          if (!geminiClosing) abandonProducer("Gemini Live error");
         },
         onclose: () => {
           if (!geminiClosing) {
             const message = "Gemini Live closed unexpectedly.";
             console.warn(`[audio ${id}] ${message}`);
             sendToOperator({ type: "gemini.error", message });
+            abandonProducer("Gemini Live closed unexpectedly");
           }
         },
       },
@@ -702,24 +749,51 @@ audioServer.on("connection", (socket, request) => {
         if (control.type === "audio.start") {
           if (audioStartAt || audioInputStopped) return;
           const activeProducer = activeProducers.get(sessionId);
-          if (activeProducer && activeProducer !== connectionId) {
+          if (activeProducer && activeProducer.connectionId !== connectionId) {
+            const ownerReadyState = readyStateName(activeProducer.socket.readyState);
+            if (activeProducer.socket.readyState === WebSocket.OPEN || activeProducer.socket.readyState === WebSocket.CONNECTING) {
+              const message = `Session ${sessionId} already has an active audio producer.`;
+              console.warn(`[${sessionId}] producer busy`, {
+                requestedConnectionId: connectionId,
+                ownerConnectionId: activeProducer.connectionId,
+                ownerReadyState,
+                ownerReservedAt: new Date(activeProducer.reservedAt).toISOString(),
+              });
+              sendToOperator({ type: "session.error", code: "SESSION_BUSY", message });
+              socket.close(4009, "Session busy");
+              return;
+            }
+            console.warn(`[${sessionId}] stale producer reservation cleared`, {
+              ownerConnectionId: activeProducer.connectionId,
+              ownerReadyState,
+              ownerReservedAt: new Date(activeProducer.reservedAt).toISOString(),
+            });
+            releaseProducer(sessionId, activeProducer.connectionId, `stale owner ${ownerReadyState}`);
+          }
+
+          if (activeProducers.has(sessionId)) {
             const message = `Session ${sessionId} already has an active audio producer.`;
-            console.warn(`[audio ${id}] ${message}`);
+            console.warn(`[${sessionId}] producer busy`, { requestedConnectionId: connectionId });
             sendToOperator({ type: "session.error", code: "SESSION_BUSY", message });
             socket.close(4009, "Session busy");
             return;
           }
-          activeProducers.set(sessionId, connectionId);
+          const reservedAt = Date.now();
+          activeProducers.set(sessionId, { connectionId, socket, reservedAt });
+          console.log(`[${sessionId}] producer reserved`, { connectionId, reservedAt: new Date(reservedAt).toISOString() });
           publicSessions.setStatus(sessionId, "live");
           audioStartAt ??= Date.now();
           audioMode = control.mode === "live-translate" ? "live-translate" : "legacy";
           console.log(`[audio ${id}] control: audio.start`);
-          void openGeminiSession().catch(() => undefined);
+          void openGeminiSession().catch(() => {
+            abandonProducer("Gemini setup failed");
+          });
         }
         if (control.type === "audio.stop") {
           if (audioInputStopped) return;
           audioInputStopped = true;
           console.log(`[audio ${id}] control: audio.stop`);
+          releaseProducer(sessionId, connectionId, "audio.stop");
           void endGeminiAudio();
         }
       } catch {
@@ -754,13 +828,11 @@ audioServer.on("connection", (socket, request) => {
 
   socket.on("error", (error) => {
     console.warn(`[audio ${id}] socket error: ${error.message}`);
+    abandonProducer("socket.error");
   });
 
-  socket.on("close", () => {
-    if (activeProducers.get(sessionId) === connectionId) {
-      activeProducers.delete(sessionId);
-      publicSessions.setStatus(sessionId, "offline");
-    }
+  socket.on("close", (code) => {
+    releaseProducer(sessionId, connectionId, `socket.close:${code}`);
     connectionClosed = true;
     interimTranslationVersion += 1;
     pendingInterimTranslation = undefined;
@@ -830,6 +902,9 @@ function closeForShutdown(signal: "SIGINT" | "SIGTERM") {
   shuttingDown = true;
   console.log(`Received ${signal}; closing NerdLingo connections.`);
 
+  for (const [sessionId, owner] of activeProducers) {
+    releaseProducer(sessionId, owner.connectionId, `server.${signal}`);
+  }
   for (const client of audioServer.clients) client.close(1001, "Server shutting down");
   for (const client of viewerServer.clients) client.close(1001, "Server shutting down");
 
