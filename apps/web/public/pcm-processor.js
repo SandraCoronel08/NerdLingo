@@ -7,11 +7,18 @@ class PcmProcessor extends AudioWorkletProcessor {
     this.position = 0;
     this.previousSample = 0;
     this.pending = [];
+    this.debugCapture = options.processorOptions.debugCapture === true;
+    this.reportedFirstInput = false;
   }
 
   process(inputs) {
     const input = inputs[0]?.[0];
     if (!input?.length) return true;
+
+    if (this.debugCapture && !this.reportedFirstInput) {
+      this.reportedFirstInput = true;
+      this.port.postMessage({ type: "capture.first-input", inputSampleRate: sampleRate, inputFrames: input.length });
+    }
 
     const samples = new Float32Array(input.length + 1);
     samples[0] = this.previousSample;

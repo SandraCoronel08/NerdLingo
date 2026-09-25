@@ -16,6 +16,7 @@ type SessionId = "stage-1" | "stage-2";
 
 type CaptureRun = {
   id: number;
+  startedAtPerformanceMs: number;
   cancelled: boolean;
   draining: boolean;
   socket?: WebSocket;
@@ -67,11 +68,13 @@ const initialStats: StreamStats = {
 
 const liveTranslateDrainTimeoutMs = 10_000;
 
-function audioWebSocketUrl(sessionId: SessionId) {
-  return backendWebSocketUrl("/audio", sessionId);
+function audioWebSocketUrl(sessionId: SessionId, debugCapture: boolean) {
+  const url = new URL(backendWebSocketUrl("/audio", sessionId));
+  if (debugCapture) url.searchParams.set("debugCapture", "1");
+  return url.toString();
 }
 
-function OperatorSession({ sessionId }: { sessionId: SessionId }) {
+function OperatorSession({ sessionId, debugCapture = false }: { sessionId: SessionId; debugCapture?: boolean }) {
   const [status, setStatus] = useState<StreamStatus>("Idle");
   const [error, setError] = useState<string | null>(null);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -227,7 +230,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
     }
     if (activeRunRef.current) return;
 
-    const run: CaptureRun = { id: nextRunIdRef.current + 1, cancelled: false, draining: false };
+    const run: CaptureRun = { id: nextRunIdRef.current + 1, startedAtPerformanceMs: performance.now(), cancelled: false, draining: false };
     nextRunIdRef.current = run.id;
     activeRunRef.current = run;
     const selectedDeviceForRun = selectedDeviceId;
@@ -270,10 +273,11 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
       if (!isCurrentRun(run)) return;
 
       setStatus("Connecting");
-      const socket = new WebSocket(audioWebSocketUrl(sessionId));
+      const socket = new WebSocket(audioWebSocketUrl(sessionId, debugCapture));
       socket.binaryType = "arraybuffer";
       run.socket = socket;
       let pipelineStarted = false;
+      let firstPcmDebugSent = false;
 
       const startAudioPipeline = async () => {
         if (pipelineStarted || !isCapturingRun(run)) return;
@@ -290,7 +294,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
           const worklet = new AudioWorkletNode(context, "pcm-processor", {
             channelCount: 1,
             channelCountMode: "explicit",
-            processorOptions: { targetSampleRate: 16_000, chunkDurationMs: 40 },
+            processorOptions: { targetSampleRate: 16_000, chunkDurationMs: 40, debugCapture },
           });
           const silent = context.createGain();
           silent.gain.value = 0;
@@ -298,14 +302,52 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
           run.worklet = worklet;
           run.silent = silent;
 
-          worklet.port.onmessage = (message: MessageEvent<{ type: string; buffer: ArrayBuffer }>) => {
-            if (!isCapturingRun(run) || message.data.type !== "pcm" || socket.readyState !== WebSocket.OPEN) return;
+          worklet.port.onmessage = (message: MessageEvent<{ type: string; buffer?: ArrayBuffer; inputSampleRate?: number; inputFrames?: number }>) => {
+            if (!isCapturingRun(run) || socket.readyState !== WebSocket.OPEN) return;
+            if (message.data.type === "capture.first-input") {
+              if (debugCapture) {
+                const payload = {
+                  type: "audio.capture.debug",
+                  event: "worklet-first-input",
+                  clientCapturedAt: Date.now(),
+                  clientElapsedMs: performance.now() - run.startedAtPerformanceMs,
+                  audioContextSampleRate: context.sampleRate,
+                  workletInputSampleRate: message.data.inputSampleRate,
+                  workletInputFrames: message.data.inputFrames,
+                  trackSettings: {
+                    sampleRate: activeTrack?.getSettings().sampleRate,
+                    channelCount: activeTrack?.getSettings().channelCount,
+                    sampleSize: activeTrack?.getSettings().sampleSize,
+                    echoCancellation: activeTrack?.getSettings().echoCancellation,
+                    noiseSuppression: activeTrack?.getSettings().noiseSuppression,
+                    autoGainControl: activeTrack?.getSettings().autoGainControl,
+                  },
+                };
+                console.info("[CAPTURE_DEBUG]", payload);
+                socket.send(JSON.stringify(payload));
+              }
+              return;
+            }
+            const pcmBuffer = message.data.buffer;
+            if (message.data.type !== "pcm" || !pcmBuffer) return;
             const now = new Date().toISOString();
-            socket.send(message.data.buffer);
+            if (debugCapture && !firstPcmDebugSent) {
+              firstPcmDebugSent = true;
+              const payload = {
+                type: "audio.capture.debug",
+                event: "pcm-sent",
+                clientCapturedAt: Date.now(),
+                clientElapsedMs: performance.now() - run.startedAtPerformanceMs,
+                pcmBytes: pcmBuffer.byteLength,
+              };
+              console.info("[CAPTURE_DEBUG]", payload);
+              socket.send(JSON.stringify(payload));
+            }
+            socket.send(pcmBuffer);
             setStats((current) => ({
               ...current,
               chunksSent: current.chunksSent + 1,
-              bytesSent: current.bytesSent + message.data.buffer.byteLength,
+              bytesSent: current.bytesSent + pcmBuffer.byteLength,
               captureStartedAt: current.captureStartedAt ?? now,
               firstChunkSentAt: current.firstChunkSentAt ?? now,
               lastChunkSentAt: now,
@@ -427,7 +469,13 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
           socket.close(1000, "Audio session cancelled");
           return;
         }
-        socket.send(JSON.stringify({ type: "audio.start", mode: audioMode, sourceLanguage, targetLanguage }));
+        socket.send(JSON.stringify({
+          type: "audio.start",
+          mode: audioMode,
+          sourceLanguage,
+          targetLanguage,
+          ...(debugCapture ? { captureDebug: { clientStartedAt: Date.now(), clientElapsedMs: performance.now() - run.startedAtPerformanceMs } } : {}),
+        }));
       };
     } catch (cause) {
       if (!isCurrentRun(run)) return;
@@ -635,7 +683,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
 function SessionPage() {
   const searchParams = useSearchParams();
   const sessionId: SessionId = searchParams.get("session") === "stage-2" ? "stage-2" : "stage-1";
-  return <OperatorSession sessionId={sessionId} />;
+  return <OperatorSession sessionId={sessionId} debugCapture={searchParams.get("debugCapture") === "1"} />;
 }
 
 export default function Home() {

@@ -303,6 +303,7 @@ audioServer.on("connection", (socket, request) => {
   const connectionId = randomUUID();
   const id = `[${sessionId}][audio ${connectionId}]`;
   const websocketOpenedAt = Date.now();
+  const captureDebugEnabled = new URL(request.url ?? "/", "http://localhost").searchParams.get("debugCapture") === "1";
   let audioMode: AudioMode = "legacy";
   let sourceLanguage: LiveLanguage = defaultLanguageSelection.sourceLanguage;
   let targetLanguage: LiveLanguage = defaultLanguageSelection.targetLanguage;
@@ -366,6 +367,19 @@ audioServer.on("connection", (socket, request) => {
   const pendingAudio: Buffer[] = [];
   let pendingLiveTranslateAudio = Buffer.alloc(0);
   let liveTranslateDrainCompleteSent = false;
+  let captureDebugStartClientElapsedMs: number | undefined;
+  let captureDebugWorkletFirstInputClientElapsedMs: number | undefined;
+  let captureDebugWorkletFirstInputAt: number | undefined;
+  let captureDebugPcmSentClientElapsedMs: number | undefined;
+  let captureDebugPcmSentAt: number | undefined;
+  let captureDebugAudioContextSampleRate: number | undefined;
+  let captureDebugWorkletInputSampleRate: number | undefined;
+  let captureDebugTrackSampleRate: number | undefined;
+  let captureDebugTrackChannelCount: number | undefined;
+  let captureDebugTrackSampleSize: number | undefined;
+  let captureDebugTrackEchoCancellation: boolean | undefined;
+  let captureDebugTrackNoiseSuppression: boolean | undefined;
+  let captureDebugTrackAutoGainControl: boolean | undefined;
 
   monitorHeartbeat(socket, { kind: "producer", sessionId, connectionId });
 
@@ -876,7 +890,26 @@ audioServer.on("connection", (socket, request) => {
   socket.on("message", (data, isBinary) => {
     if (!isBinary) {
       try {
-        const control = JSON.parse(data.toString()) as { type?: string; mode?: AudioMode; sourceLanguage?: string; targetLanguage?: string };
+        const control = JSON.parse(data.toString()) as {
+          type?: string;
+          mode?: AudioMode;
+          sourceLanguage?: string;
+          targetLanguage?: string;
+          captureDebug?: { clientStartedAt?: number; clientElapsedMs?: number };
+          event?: "worklet-first-input" | "pcm-sent";
+          clientCapturedAt?: number;
+          clientElapsedMs?: number;
+          audioContextSampleRate?: number;
+          workletInputSampleRate?: number;
+          trackSettings?: {
+            sampleRate?: number;
+            channelCount?: number;
+            sampleSize?: number;
+            echoCancellation?: boolean;
+            noiseSuppression?: boolean;
+            autoGainControl?: boolean;
+          };
+        };
         if (control.type === "audio.start") {
           if (audioStartAt || audioInputStopped) return;
           const activeProducer = activeProducers.get(sessionId);
@@ -914,6 +947,10 @@ audioServer.on("connection", (socket, request) => {
           console.log(`[${sessionId}] producer reserved`, { connectionId, reservedAt: new Date(reservedAt).toISOString() });
           audioStartAt ??= Date.now();
           ({ sourceLanguage, targetLanguage } = languageSelectionFromAudioStart(control.sourceLanguage, control.targetLanguage));
+          if (captureDebugEnabled) {
+            captureDebugStartClientElapsedMs = control.captureDebug?.clientElapsedMs;
+            console.info(`[CAPTURE_DEBUG][${sessionId}] audio.start`, { clientStartedAt: control.captureDebug?.clientStartedAt ?? null, clientElapsedMs: captureDebugStartClientElapsedMs ?? null });
+          }
           publicSessions.beginRun(sessionId, sourceLanguage, targetLanguage);
           transcriptRuns.start(sessionId, sourceLanguage, targetLanguage, audioStartAt);
           audioMode = control.mode === "live-translate" ? "live-translate" : "legacy";
@@ -922,6 +959,34 @@ audioServer.on("connection", (socket, request) => {
             publicSessions.setError(sessionId, "Gemini session setup failed.");
             abandonProducer("Gemini setup failed");
           });
+        }
+        if (control.type === "audio.capture.debug" && captureDebugEnabled && control.event === "worklet-first-input") {
+          captureDebugWorkletFirstInputAt ??= control.clientCapturedAt;
+          captureDebugWorkletFirstInputClientElapsedMs ??= control.clientElapsedMs;
+          captureDebugAudioContextSampleRate ??= control.audioContextSampleRate;
+          captureDebugWorkletInputSampleRate ??= control.workletInputSampleRate;
+          captureDebugTrackSampleRate ??= control.trackSettings?.sampleRate;
+          captureDebugTrackChannelCount ??= control.trackSettings?.channelCount;
+          captureDebugTrackSampleSize ??= control.trackSettings?.sampleSize;
+          captureDebugTrackEchoCancellation ??= control.trackSettings?.echoCancellation;
+          captureDebugTrackNoiseSuppression ??= control.trackSettings?.noiseSuppression;
+          captureDebugTrackAutoGainControl ??= control.trackSettings?.autoGainControl;
+          console.info(`[CAPTURE_DEBUG][${sessionId}] worklet-first-input`, {
+            clientElapsedMs: captureDebugWorkletFirstInputClientElapsedMs ?? null,
+            audioContextSampleRate: captureDebugAudioContextSampleRate ?? null,
+            workletInputSampleRate: captureDebugWorkletInputSampleRate ?? null,
+            trackSampleRate: captureDebugTrackSampleRate ?? null,
+            trackChannelCount: captureDebugTrackChannelCount ?? null,
+            trackSampleSize: captureDebugTrackSampleSize ?? null,
+            trackEchoCancellation: captureDebugTrackEchoCancellation ?? null,
+            trackNoiseSuppression: captureDebugTrackNoiseSuppression ?? null,
+            trackAutoGainControl: captureDebugTrackAutoGainControl ?? null,
+          });
+        }
+        if (control.type === "audio.capture.debug" && captureDebugEnabled && control.event === "pcm-sent") {
+          captureDebugPcmSentAt ??= control.clientCapturedAt;
+          captureDebugPcmSentClientElapsedMs ??= control.clientElapsedMs;
+          console.info(`[CAPTURE_DEBUG][${sessionId}] first-pcm-sent`, { clientElapsedMs: captureDebugPcmSentClientElapsedMs ?? null });
         }
         if (control.type === "audio.stop") {
           if (audioInputStopped) return;
@@ -945,6 +1010,7 @@ audioServer.on("connection", (socket, request) => {
     }
 
     const now = Date.now();
+    const firstChunk = firstChunkReceivedAt === undefined;
     firstChunkReceivedAt ??= now;
     lastChunkReceivedAt = now;
     chunksReceived += 1;
@@ -952,6 +1018,14 @@ audioServer.on("connection", (socket, request) => {
       ? data.reduce((total, chunk) => total + chunk.length, 0)
       : data.byteLength;
     bytesReceived += chunkBytes;
+
+    if (captureDebugEnabled && firstChunk) {
+      console.info(`[CAPTURE_DEBUG][${sessionId}] backend-first-pcm`, {
+        receivedAt: new Date(now).toISOString(),
+        bytes: chunkBytes,
+        audioStartToFirstChunkMs: audioStartAt ? now - audioStartAt : null,
+      });
+    }
 
     if (Array.isArray(data)) {
       sendAudioToGemini(Buffer.concat(data));
@@ -1013,6 +1087,30 @@ audioServer.on("connection", (socket, request) => {
       liveTranslateConnectLatencyMs: liveTranslateConnectStartedAt && liveTranslateConnectedAt ? liveTranslateConnectedAt - liveTranslateConnectStartedAt : null,
       timeToFirstInputTranscriptMs: firstAudioSentToLiveTranslateAt && firstInputTranscriptAt ? firstInputTranscriptAt - firstAudioSentToLiveTranslateAt : null,
       timeToFirstTranslatedTranscriptMs: firstAudioSentToLiveTranslateAt && firstOutputTranscriptAt ? firstOutputTranscriptAt - firstAudioSentToLiveTranslateAt : null,
+      ...(captureDebugEnabled ? {
+        captureDebug: {
+          clientStartElapsedMs: captureDebugStartClientElapsedMs ?? null,
+          clientWorkletFirstInputElapsedMs: captureDebugWorkletFirstInputClientElapsedMs ?? null,
+          clientFirstPcmSentElapsedMs: captureDebugPcmSentClientElapsedMs ?? null,
+          clientWorkletToFirstPcmMs: captureDebugWorkletFirstInputClientElapsedMs !== undefined && captureDebugPcmSentClientElapsedMs !== undefined
+            ? captureDebugPcmSentClientElapsedMs - captureDebugWorkletFirstInputClientElapsedMs
+            : null,
+          clientWorkletFirstInputAt: captureDebugWorkletFirstInputAt ? new Date(captureDebugWorkletFirstInputAt).toISOString() : null,
+          clientFirstPcmSentAt: captureDebugPcmSentAt ? new Date(captureDebugPcmSentAt).toISOString() : null,
+          audioContextSampleRate: captureDebugAudioContextSampleRate ?? null,
+          workletInputSampleRate: captureDebugWorkletInputSampleRate ?? null,
+          trackSampleRate: captureDebugTrackSampleRate ?? null,
+          trackChannelCount: captureDebugTrackChannelCount ?? null,
+          trackSampleSize: captureDebugTrackSampleSize ?? null,
+          trackEchoCancellation: captureDebugTrackEchoCancellation ?? null,
+          trackNoiseSuppression: captureDebugTrackNoiseSuppression ?? null,
+          trackAutoGainControl: captureDebugTrackAutoGainControl ?? null,
+          serverLiveTranslateConnectedToFirstPcmMs: liveTranslateConnectedAt && firstChunkReceivedAt ? firstChunkReceivedAt - liveTranslateConnectedAt : null,
+          serverFirstPcmToFirstLiveBatchMs: firstChunkReceivedAt && firstAudioSentToLiveTranslateAt ? firstAudioSentToLiveTranslateAt - firstChunkReceivedAt : null,
+          serverFirstPcmToFirstInputCaptionMs: firstChunkReceivedAt && firstInputTranscriptAt ? firstInputTranscriptAt - firstChunkReceivedAt : null,
+          serverFirstPcmToFirstTranslatedCaptionMs: firstChunkReceivedAt && firstOutputTranscriptAt ? firstOutputTranscriptAt - firstChunkReceivedAt : null,
+        },
+      } : {}),
       inputTranscriptEventCount,
       outputTranscriptEventCount,
       liveTranslateServerMessageCount,
