@@ -12,16 +12,23 @@ type OverlayState = {
 };
 
 const emptyState: OverlayState = { status: "offline", original: "", spanish: "" };
-const maxCaptionCharacters = 210;
+const maxWordsPerCaptionBlock = 10;
 
-function latestCaptionWindow(caption: string) {
-  const normalizedCaption = caption.trim();
-  if (normalizedCaption.length <= maxCaptionCharacters) return normalizedCaption;
+function normalizeCaption(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
 
-  const firstVisibleSpace = normalizedCaption.indexOf(" ", normalizedCaption.length - maxCaptionCharacters);
-  const visibleText = normalizedCaption.slice(firstVisibleSpace === -1 ? normalizedCaption.length - maxCaptionCharacters : firstVisibleSpace + 1);
+function currentSentence(text: string) {
+  const sentences = normalizeCaption(text).match(/[^.!?]+(?:[.!?]+|$)/g);
+  return sentences?.at(-1)?.trim() ?? "";
+}
 
-  return `…${visibleText}`;
+function currentSentenceBlock(sentence: string) {
+  const words = sentence.split(" ").filter(Boolean);
+  if (!words.length) return "";
+
+  const blockStart = Math.floor((words.length - 1) / maxWordsPerCaptionBlock) * maxWordsPerCaptionBlock;
+  return words.slice(blockStart).join(" ");
 }
 
 export default function OverlayClient({ sessionId, language }: { sessionId: SessionId; language: OverlayLanguage }) {
@@ -64,14 +71,16 @@ export default function OverlayClient({ sessionId, language }: { sessionId: Sess
   }, [sessionId]);
 
   const caption = language === "original" ? state.original : state.spanish;
-  const visibleCaption = state.status === "live" ? latestCaptionWindow(caption) : "";
+  const visibleCaption = state.status === "live" ? currentSentenceBlock(currentSentence(caption)) : "";
 
   return (
     <main className="flex min-h-screen items-end justify-center bg-transparent px-[5vw] pb-[8vh] pt-[30vh] text-center text-white" aria-live="polite" aria-label="Live captions overlay">
       {visibleCaption ? (
-        <p className="line-clamp-2 max-w-[90vw] overflow-hidden rounded-xl bg-black/55 px-6 py-3 text-[clamp(2rem,4.6vw,5.5rem)] font-semibold leading-[1.18] tracking-tight text-balance [overflow-wrap:anywhere] [text-shadow:0_2px_8px_rgb(0_0_0_/_0.95)] sm:px-10 sm:py-5">
-          {visibleCaption}
-        </p>
+        <div className="w-[86vw] max-w-[1500px] rounded-lg bg-black/55 px-5 py-2 shadow-[0_2px_8px_rgb(0_0_0_/_0.95)] sm:px-6">
+          <div className="flex h-[1.2em] items-end overflow-hidden text-[clamp(1.75rem,2.2vw,2.625rem)] font-semibold leading-[1.2] tracking-tight">
+            <p className="w-full shrink-0">{visibleCaption}</p>
+          </div>
+        </div>
       ) : null}
     </main>
   );
