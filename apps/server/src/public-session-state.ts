@@ -8,6 +8,18 @@ export type PublicSessionMessage = {
   spanish: string;
 };
 
+export type PublicSessionMonitoring = {
+  sessionId: string;
+  status: PublicSessionStatus;
+  viewerCount: number;
+  lastUpdatedAt: number | null;
+  lastOriginalAt: number | null;
+  lastSpanishAt: number | null;
+  firstOriginalLatencyMs: number | null;
+  firstSpanishLatencyMs: number | null;
+  lastError: { message: string; at: number } | null;
+};
+
 type ViewerSocket = {
   readyState: number;
   send(data: string): void;
@@ -18,6 +30,12 @@ type PublicSession = {
   original: string;
   spanish: string;
   viewers: Set<ViewerSocket>;
+  lastUpdatedAt: number | null;
+  lastOriginalAt: number | null;
+  lastSpanishAt: number | null;
+  firstOriginalLatencyMs: number | null;
+  firstSpanishLatencyMs: number | null;
+  lastError: { message: string; at: number } | null;
 };
 
 export class PublicSessionState {
@@ -25,7 +43,18 @@ export class PublicSessionState {
 
   constructor(sessionIds: string[]) {
     for (const sessionId of sessionIds) {
-      this.sessions.set(sessionId, { status: "offline", original: "", spanish: "", viewers: new Set() });
+      this.sessions.set(sessionId, {
+        status: "offline",
+        original: "",
+        spanish: "",
+        viewers: new Set(),
+        lastUpdatedAt: null,
+        lastOriginalAt: null,
+        lastSpanishAt: null,
+        firstOriginalLatencyMs: null,
+        firstSpanishLatencyMs: null,
+        lastError: null,
+      });
     }
   }
 
@@ -43,23 +72,64 @@ export class PublicSessionState {
     const session = this.requireSession(sessionId);
     if (session.status === status) return;
     session.status = status;
+    session.lastUpdatedAt = Date.now();
     this.broadcast(sessionId, session);
   }
 
-  setOriginal(sessionId: string, original: string) {
+  beginRun(sessionId: string) {
+    const session = this.requireSession(sessionId);
+    session.firstOriginalLatencyMs = null;
+    session.firstSpanishLatencyMs = null;
+    session.lastError = null;
+    session.status = "live";
+    session.lastUpdatedAt = Date.now();
+    this.broadcast(sessionId, session);
+  }
+
+  setOriginal(sessionId: string, original: string, firstLatencyMs: number | null = null) {
     const session = this.requireSession(sessionId);
     session.original = original;
+    const now = Date.now();
+    session.lastOriginalAt = now;
+    session.lastUpdatedAt = now;
+    if (session.firstOriginalLatencyMs === null && firstLatencyMs !== null) session.firstOriginalLatencyMs = firstLatencyMs;
     this.broadcast(sessionId, session);
   }
 
-  setSpanish(sessionId: string, spanish: string) {
+  setSpanish(sessionId: string, spanish: string, firstLatencyMs: number | null = null) {
     const session = this.requireSession(sessionId);
     session.spanish = spanish;
+    const now = Date.now();
+    session.lastSpanishAt = now;
+    session.lastUpdatedAt = now;
+    if (session.firstSpanishLatencyMs === null && firstLatencyMs !== null) session.firstSpanishLatencyMs = firstLatencyMs;
     this.broadcast(sessionId, session);
+  }
+
+  setError(sessionId: string, message: string) {
+    const session = this.requireSession(sessionId);
+    const now = Date.now();
+    session.lastError = { message, at: now };
+    session.lastUpdatedAt = now;
   }
 
   viewerCount(sessionId: string) {
     return this.requireSession(sessionId).viewers.size;
+  }
+
+  monitoring(sessionId: string): PublicSessionMonitoring {
+    const session = this.requireSession(sessionId);
+    return {
+      sessionId,
+      status: session.status,
+      viewerCount: session.viewers.size,
+      lastUpdatedAt: session.lastUpdatedAt,
+      lastOriginalAt: session.lastOriginalAt,
+      lastSpanishAt: session.lastSpanishAt,
+      firstOriginalLatencyMs: session.firstOriginalLatencyMs,
+      firstSpanishLatencyMs: session.firstSpanishLatencyMs,
+      lastError: session.lastError,
+    };
   }
 
   private broadcast(sessionId: string, session: PublicSession) {

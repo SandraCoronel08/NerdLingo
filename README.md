@@ -29,6 +29,7 @@ The browser captures the selected operating-system audio input through `getUserM
 - Audience pages with stage selection and an Original / Español toggle.
 - Mobile-friendly audience UI and WebSocket text fan-out to multiple viewers.
 - Transparent live-caption overlay for OBS and vMix Browser/Web inputs.
+- Production monitoring dashboard for Stage 1 and Stage 2.
 - Viewer reconnection, WebSocket heartbeat, and graceful server shutdown.
 - Render backend and Vercel frontend deployments.
 - `GET /health` health endpoint.
@@ -40,6 +41,7 @@ The Legacy transcription-plus-text-translation pipeline is retained temporarily 
 - Frontend: <https://nerdlingo-ecru.vercel.app/>
 - Backend health: <https://nerdlingo.onrender.com/health>
 - Audience: <https://nerdlingo-ecru.vercel.app/session>
+- Production monitor: <https://nerdlingo-ecru.vercel.app/monitor>
 - Operator Stage 1: <https://nerdlingo-ecru.vercel.app/?session=stage-1>
 - Operator Stage 2: <https://nerdlingo-ecru.vercel.app/?session=stage-2>
 
@@ -139,6 +141,18 @@ Audience delivery is WebSocket text fan-out. The current public session state is
 - The backend handles graceful shutdown.
 
 If a producer connection is lost, the operator is asked to press **Start audio** again. Automatic producer reconnection is intentionally not implemented yet to avoid duplicate browser capture and duplicate Gemini sessions.
+
+## Production Monitoring
+
+The public `/monitor` dashboard refreshes every 3 seconds and shows the operational state of `stage-1` and `stage-2` independently:
+
+- Live / Offline status and producer connection.
+- Active audience viewer count.
+- Last activity, Original update, and Spanish update timestamps.
+- First Original and First Spanish caption latency for the current run.
+- The latest sanitized operational error, when present.
+
+These are first-caption measurements, not continuous end-to-end latency metrics. Monitoring state is in memory in this MVP. The dashboard exposes no API keys, audio, stack traces, or internal connection IDs.
 
 ## Local Development
 
@@ -274,7 +288,7 @@ Long-form technical English containing terms such as GPL, WordPress, PHP, BSD, M
 - Technical proper names can still be misrecognized.
 - Gemini Live Translate is preview technology.
 - The production path currently validated is English → Spanish.
-- SRT/VTT export and a monitoring dashboard are not implemented yet.
+- SRT/VTT export is not implemented yet.
 
 ## Roadmap
 
@@ -283,7 +297,6 @@ Planned improvements:
 - More languages, including Portuguese.
 - Technical glossary and proper-name context.
 - TXT/SRT/VTT transcript export.
-- Production monitoring dashboard.
 - QR-based audience access.
 - Optional Cloud Run deployment.
 

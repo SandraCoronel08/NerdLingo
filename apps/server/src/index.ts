@@ -203,6 +203,17 @@ function sessionIdFromUrl(url: string | undefined) {
 }
 
 const server = createServer((request, response) => {
+  if (request.method === "GET" && request.url === "/monitor") {
+    const stages = allowedSessionIds.map((sessionId) => {
+      const producer = activeProducers.get(sessionId);
+      const producerConnected = producer?.socket.readyState === WebSocket.OPEN || producer?.socket.readyState === WebSocket.CONNECTING;
+      return { ...publicSessions.monitoring(sessionId), producerConnected };
+    });
+    response.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" });
+    response.end(JSON.stringify({ generatedAt: Date.now(), stages }));
+    return;
+  }
+
   if (request.method === "GET" && request.url === "/health") {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ status: "ok", service: "nerdlingo-server" }));
@@ -322,10 +333,19 @@ audioServer.on("connection", (socket, request) => {
 
   const sendToOperator = (message: OperatorMessage) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
-    if (message.type === "liveTranslate.input" || message.type === "transcript.interim" || message.type === "transcript.final") {
-      publicSessions.setOriginal(sessionId, message.text);
+    if (message.type === "liveTranslate.input") {
+      publicSessions.setOriginal(sessionId, message.text, message.firstAudioLatencyMs);
     }
-    if (message.type === "liveTranslate.output" || message.type === "translation.interim" || message.type === "translation.final") {
+    if (message.type === "transcript.interim" || message.type === "transcript.final") {
+      publicSessions.setOriginal(sessionId, message.text, message.firstChunkLatencyMs);
+    }
+    if (message.type === "liveTranslate.output") {
+      publicSessions.setSpanish(sessionId, message.text, message.firstAudioLatencyMs);
+    }
+    if (message.type === "translation.interim") {
+      publicSessions.setSpanish(sessionId, message.text, message.firstChunkToTranslationMs);
+    }
+    if (message.type === "translation.final") {
       publicSessions.setSpanish(sessionId, message.text);
     }
   };
@@ -522,6 +542,7 @@ audioServer.on("connection", (socket, request) => {
     if (!apiKey) {
       const message = "Gemini is not configured on the server.";
       console.warn(`[audio ${id}] ${message}`);
+      publicSessions.setError(sessionId, message);
       sendToOperator({ type: "liveTranslate.error", message });
       throw new Error(message);
     }
@@ -590,6 +611,7 @@ audioServer.on("connection", (socket, request) => {
         onerror: (error) => {
           const message = "Gemini Live Translate encountered a connection error.";
           console.warn(`[audio ${id}] ${message}`, { error: error.message });
+          publicSessions.setError(sessionId, message);
           sendToOperator({ type: "liveTranslate.error", message });
           if (!geminiClosing) abandonProducer("Gemini Live Translate error");
         },
@@ -598,6 +620,7 @@ audioServer.on("connection", (socket, request) => {
           if (!geminiClosing) {
             const message = "Gemini Live Translate closed unexpectedly.";
             console.warn(`[audio ${id}] ${message}`);
+            publicSessions.setError(sessionId, message);
             sendToOperator({ type: "liveTranslate.error", message });
             abandonProducer("Gemini Live Translate closed unexpectedly");
           }
@@ -625,6 +648,7 @@ audioServer.on("connection", (socket, request) => {
     if (!apiKey) {
       const message = "Gemini is not configured on the server.";
       console.warn(`[audio ${id}] ${message}`);
+      publicSessions.setError(sessionId, message);
       sendToOperator({ type: "gemini.error", message });
       throw new Error(message);
     }
@@ -669,6 +693,7 @@ audioServer.on("connection", (socket, request) => {
         onerror: () => {
           const message = "Gemini Live encountered a connection error.";
           console.warn(`[audio ${id}] ${message}`);
+          publicSessions.setError(sessionId, message);
           sendToOperator({ type: "gemini.error", message });
           if (!geminiClosing) abandonProducer("Gemini Live error");
         },
@@ -676,6 +701,7 @@ audioServer.on("connection", (socket, request) => {
           if (!geminiClosing) {
             const message = "Gemini Live closed unexpectedly.";
             console.warn(`[audio ${id}] ${message}`);
+            publicSessions.setError(sessionId, message);
             sendToOperator({ type: "gemini.error", message });
             abandonProducer("Gemini Live closed unexpectedly");
           }
@@ -713,6 +739,7 @@ audioServer.on("connection", (socket, request) => {
       }
       geminiCloseTimer = setTimeout(closeGeminiSession, geminiCloseDelayMs);
     } catch {
+      publicSessions.setError(sessionId, "Unable to finish the Gemini audio stream.");
       closeGeminiSession();
     }
   };
@@ -730,6 +757,7 @@ audioServer.on("connection", (socket, request) => {
       if (geminiClosing) return;
       const message = error instanceof Error ? error.message : "Unable to send audio to Gemini Live.";
       console.warn(`[audio ${id}] Gemini audio send failed: ${message}`);
+      publicSessions.setError(sessionId, "Unable to send audio to Gemini Live.");
       sendToOperator({ type: "gemini.error", message: "Unable to send audio to Gemini Live." });
     }
   };
@@ -759,6 +787,7 @@ audioServer.on("connection", (socket, request) => {
         if (geminiClosing) return;
         const message = error instanceof Error ? error.message : "Unable to send audio to Gemini Live Translate.";
         console.warn(`[audio ${id}] Gemini Live Translate audio send failed: ${message}`);
+        publicSessions.setError(sessionId, "Unable to send audio to Gemini Live Translate.");
         sendToOperator({ type: "liveTranslate.error", message: "Unable to send audio to Gemini Live Translate." });
       }
     }
@@ -837,11 +866,12 @@ audioServer.on("connection", (socket, request) => {
           const reservedAt = Date.now();
           activeProducers.set(sessionId, { connectionId, socket, reservedAt });
           console.log(`[${sessionId}] producer reserved`, { connectionId, reservedAt: new Date(reservedAt).toISOString() });
-          publicSessions.setStatus(sessionId, "live");
+          publicSessions.beginRun(sessionId);
           audioStartAt ??= Date.now();
           audioMode = control.mode === "live-translate" ? "live-translate" : "legacy";
           console.log(`[audio ${id}] control: audio.start`);
           void openGeminiSession().catch(() => {
+            publicSessions.setError(sessionId, "Gemini session setup failed.");
             abandonProducer("Gemini setup failed");
           });
         }
@@ -884,10 +914,12 @@ audioServer.on("connection", (socket, request) => {
 
   socket.on("error", (error) => {
     console.warn(`[audio ${id}] socket error: ${error.message}`);
+    publicSessions.setError(sessionId, "Producer WebSocket error.");
     abandonProducer("socket.error");
   });
 
   socket.on("close", (code) => {
+    if (!audioInputStopped && code !== 1000) publicSessions.setError(sessionId, "Producer disconnected unexpectedly.");
     releaseProducer(sessionId, connectionId, `socket.close:${code}`);
     connectionClosed = true;
     interimTranslationVersion += 1;
