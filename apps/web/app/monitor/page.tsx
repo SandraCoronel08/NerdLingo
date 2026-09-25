@@ -5,6 +5,7 @@ import { DownloadTranscriptButton, Metric, StatusBadge, StorageBadge } from "../
 import { BrandHero, BrandMark } from "../../components/brand-mark";
 import { backendHttpUrl } from "../../lib/backend-url";
 import { emptyStageMonitoring, firstCaptionLatency, type MonitorResponse, type SessionId, type StageMonitoring, timestamp } from "../../lib/monitoring";
+import { languageLabel } from "../../lib/target-language";
 
 const sessionIds: SessionId[] = ["stage-1", "stage-2"];
 
@@ -68,7 +69,7 @@ function StageCard({ stage }: { stage: StageMonitoring }) {
     </dl>
     <dl className="mt-4 grid gap-3 sm:grid-cols-3">
       <Metric label="First Original caption" value={firstCaptionLatency(stage.firstOriginalLatencyMs)} featured />
-      <Metric label="First Spanish caption" value={firstCaptionLatency(stage.firstSpanishLatencyMs)} featured />
+      <Metric label="First translated caption" value={firstCaptionLatency(stage.firstTranslatedLatencyMs)} featured />
       <Metric label="Transcript storage" value={<StorageBadge status={stage.transcript?.storageStatus ?? null} />} featured />
     </dl>
 
@@ -76,6 +77,7 @@ function StageCard({ stage }: { stage: StageMonitoring }) {
       <div className="text-sm">
         <p className="font-medium text-slate-700">Last activity</p>
         <p className="mt-1 text-slate-500">{timestamp(stage.lastUpdatedAt)}</p>
+        <p className="mt-1 text-slate-500">{languageLabel(stage.sourceLanguage)} → {languageLabel(stage.targetLanguage)} · translated {timestamp(stage.lastTranslatedAt)}</p>
         <p className={stage.lastError ? "mt-2 text-red-700" : "mt-2 text-slate-500"}>{stage.lastError ? `Error: ${stage.lastError.message}` : "✓ No recent errors"}</p>
       </div>
       <DownloadTranscriptButton stage={stage} />

@@ -6,6 +6,7 @@ import { DownloadTranscriptButton, Metric, StatusBadge, StorageBadge } from "../
 import { BrandHero, BrandMark } from "../components/brand-mark";
 import { backendHttpUrl, backendWebSocketUrl } from "../lib/backend-url";
 import { emptyStageMonitoring, firstCaptionLatency, type MonitorResponse, type StageMonitoring, timestamp } from "../lib/monitoring";
+import { languageLabel, type LiveLanguage } from "../lib/target-language";
 
 type StreamStatus = "Idle" | "Requesting permission" | "Connecting" | "Streaming" | "Finishing transcription…" | "Stopped" | "Error";
 type GeminiStatus = "Not connected" | "Connecting" | "Connected" | "Error";
@@ -78,6 +79,8 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
   const [stats, setStats] = useState<StreamStats>(initialStats);
   const [geminiStatus, setGeminiStatus] = useState<GeminiStatus>("Not connected");
   const [audioMode, setAudioMode] = useState<AudioMode>("live-translate");
+  const [sourceLanguage, setSourceLanguage] = useState<LiveLanguage>("en");
+  const [targetLanguage, setTargetLanguage] = useState<LiveLanguage>("es");
   const [interimTranscript, setInterimTranscript] = useState("");
   const [finalTranscripts, setFinalTranscripts] = useState<string[]>([]);
   const [interimTranslation, setInterimTranslation] = useState("");
@@ -326,7 +329,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
         if (!isCurrentRun(run)) return;
         if (typeof event.data !== "string") return;
         try {
-          const message = JSON.parse(event.data) as { type?: string; text?: string; message?: string; finished?: boolean; connectLatencyMs?: number | null; firstChunkLatencyMs?: number | null; translationLatencyMs?: number; firstChunkToTranslationMs?: number | null; firstAudioLatencyMs?: number | null };
+          const message = JSON.parse(event.data) as { type?: string; text?: string; message?: string; finished?: boolean; connectLatencyMs?: number | null; firstChunkLatencyMs?: number | null; translationLatencyMs?: number; firstChunkToTranslationMs?: number | null; firstAudioLatencyMs?: number | null; sourceLanguage?: LiveLanguage; targetLanguage?: LiveLanguage };
           if (message.type === "gemini.connecting") setGeminiStatus("Connecting");
           if (message.type === "gemini.connected") {
             setGeminiStatus("Connected");
@@ -337,9 +340,13 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
             setGeminiStatus("Error");
             setError(message.message ?? "Gemini Live failed.");
           }
-          if (message.type === "liveTranslate.connecting") setGeminiStatus("Connecting");
+          if (message.type === "liveTranslate.connecting") {
+            setGeminiStatus("Connecting");
+            if (message.sourceLanguage && message.targetLanguage) setStageHealth((current) => ({ ...current, sourceLanguage: message.sourceLanguage!, targetLanguage: message.targetLanguage! }));
+          }
           if (message.type === "liveTranslate.connected") {
             setGeminiStatus("Connected");
+            if (message.sourceLanguage && message.targetLanguage) setStageHealth((current) => ({ ...current, sourceLanguage: message.sourceLanguage!, targetLanguage: message.targetLanguage! }));
             setStats((current) => ({ ...current, liveTranslateConnectLatencyMs: message.connectLatencyMs ?? null }));
             void startAudioPipeline();
           }
@@ -420,7 +427,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
           socket.close(1000, "Audio session cancelled");
           return;
         }
-        socket.send(JSON.stringify({ type: "audio.start", mode: audioMode }));
+        socket.send(JSON.stringify({ type: "audio.start", mode: audioMode, sourceLanguage, targetLanguage }));
       };
     } catch (cause) {
       if (!isCurrentRun(run)) return;
@@ -437,6 +444,8 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
   const audioSeconds = stats.bytesSent / (16_000 * 2);
   const needsMicrophoneDiscovery = devices.length === 0 || devices.every((device) => !device.label || device.label.toLowerCase() === "default");
   const stageLabel = sessionId === "stage-1" ? "Stage 1" : "Stage 2";
+  const originalLabel = `Original · ${languageLabel(sourceLanguage)}`;
+  const translatedLabel = `Translated · ${languageLabel(targetLanguage)}`;
   const operationalStatus = status === "Idle"
     ? "Ready"
     : status === "Streaming"
@@ -499,6 +508,40 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
             <option value="legacy">Legacy (debug): transcription + text translation</option>
           </select>
         </label>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block text-sm text-slate-700">
+            Source language
+            <select
+              className="mt-1 block w-full rounded border border-slate-300 bg-white p-2"
+              value={sourceLanguage}
+              onChange={(event) => {
+                const nextSource = event.target.value as LiveLanguage;
+                setSourceLanguage(nextSource);
+                setTargetLanguage(nextSource === "en" ? "es" : "en");
+              }}
+              disabled={capturePhase !== "idle"}
+            >
+              <option value="en">English</option>
+              <option value="es">Spanish</option>
+            </select>
+          </label>
+          <label className="block text-sm text-slate-700">
+            Translation language
+            <select
+              className="mt-1 block w-full rounded border border-slate-300 bg-white p-2"
+              value={targetLanguage}
+              onChange={(event) => {
+                const nextTarget = event.target.value as LiveLanguage;
+                setTargetLanguage(nextTarget);
+                setSourceLanguage(nextTarget === "en" ? "es" : "en");
+              }}
+              disabled={capturePhase !== "idle"}
+            >
+              <option value="es">Spanish</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+        </div>
         <button className="text-left text-sm text-slate-700 underline" onClick={() => void refreshDevices()} disabled={capturePhase !== "idle"}>
           Refresh audio inputs
         </button>
@@ -526,7 +569,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
             <p className="font-medium text-slate-800">Live Translate metrics</p>
             <p>Live Translate connect: {stats.liveTranslateConnectLatencyMs === null ? "—" : `${stats.liveTranslateConnectLatencyMs} ms`}</p>
             <p>First audio → original: {stats.firstLiveTranslateInputLatencyMs === null ? "—" : `${stats.firstLiveTranslateInputLatencyMs} ms`}</p>
-            <p>First audio → español: {stats.firstLiveTranslateOutputLatencyMs === null ? "—" : `${stats.firstLiveTranslateOutputLatencyMs} ms`}</p>
+            <p>First audio → {languageLabel(targetLanguage)}: {stats.firstLiveTranslateOutputLatencyMs === null ? "—" : `${stats.firstLiveTranslateOutputLatencyMs} ms`}</p>
             <p>Live Translate input events: {stats.liveTranslateInputEvents}</p>
             <p>Live Translate output events: {stats.liveTranslateOutputEvents}</p>
           </> : <>
@@ -549,13 +592,13 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
         <dl className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Metric label="Viewers" value={String(stageHealth.viewerCount)} featured />
           <Metric label="First Original caption" value={firstCaptionLatency(stageHealth.firstOriginalLatencyMs)} featured />
-          <Metric label="First Spanish caption" value={firstCaptionLatency(stageHealth.firstSpanishLatencyMs)} featured />
+          <Metric label="First translated caption" value={firstCaptionLatency(stageHealth.firstTranslatedLatencyMs)} featured />
           <Metric label="Transcript storage" value={<StorageBadge status={stageHealth.transcript?.storageStatus ?? null} />} featured />
         </dl>
         <dl className="mt-5 grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
           <Metric label="Producer" value={stageHealth.producerConnected ? "Connected" : "Not connected"} />
           <Metric label="Last Original update" value={timestamp(stageHealth.lastOriginalAt)} />
-          <Metric label="Last Spanish update" value={timestamp(stageHealth.lastSpanishAt)} />
+          <Metric label={`Last translated update (${languageLabel(stageHealth.targetLanguage)})`} value={timestamp(stageHealth.lastTranslatedAt)} />
           <Metric label="Recent error" value={stageHealth.lastError ? <span className="text-red-700">{stageHealth.lastError.message}</span> : <span className="text-slate-500">✓ No recent errors</span>} />
         </dl>
         <div className="mt-4"><DownloadTranscriptButton stage={stageHealth} /></div>
@@ -567,7 +610,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
         </div>
         <div className="grid gap-5 md:grid-cols-2">
           <div className="rounded-lg border border-[#00ACA8]/45 bg-black/25 p-5 shadow-[inset_0_1px_0_rgb(255_255_255_/_5%)]">
-            <p className="text-sm font-medium text-slate-600">Original</p>
+            <p className="text-sm font-medium text-slate-600">{originalLabel}</p>
             <p className="min-h-6 italic text-slate-600">{interimTranscript || "Waiting for speech..."}</p>
             {audioMode === "legacy" && finalTranscripts.length === 0 ? <p className="mt-2 text-slate-600">No final transcripts yet.</p> : null}
             <ol className="mt-2 list-decimal space-y-1 pl-5">
@@ -575,7 +618,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
             </ol>
           </div>
           <div className="rounded-lg border border-[#FFBA00]/45 bg-black/25 p-5 shadow-[inset_0_1px_0_rgb(255_255_255_/_5%)]">
-            <p className="text-sm font-medium text-slate-600">Español</p>
+            <p className="text-sm font-medium text-slate-600">{translatedLabel}</p>
             <p className="min-h-6 italic text-slate-600">{interimTranslation || "Waiting for translation..."}</p>
             {translationError ? <p className="mt-2 text-sm text-red-700">{translationError}</p> : null}
             {audioMode === "legacy" && finalTranslations.length === 0 ? <p className="mt-2 text-slate-600">No final translations yet.</p> : null}

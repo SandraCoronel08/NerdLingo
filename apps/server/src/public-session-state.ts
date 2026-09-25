@@ -1,3 +1,5 @@
+import type { LiveLanguage } from "./target-language.js";
+
 export type PublicSessionStatus = "offline" | "live";
 
 export type PublicSessionMessage = {
@@ -5,18 +7,22 @@ export type PublicSessionMessage = {
   sessionId: string;
   status: PublicSessionStatus;
   original: string;
-  spanish: string;
+  translated: string;
+  sourceLanguage: LiveLanguage;
+  targetLanguage: LiveLanguage;
 };
 
 export type PublicSessionMonitoring = {
   sessionId: string;
   status: PublicSessionStatus;
+  sourceLanguage: LiveLanguage;
+  targetLanguage: LiveLanguage;
   viewerCount: number;
   lastUpdatedAt: number | null;
   lastOriginalAt: number | null;
-  lastSpanishAt: number | null;
+  lastTranslatedAt: number | null;
   firstOriginalLatencyMs: number | null;
-  firstSpanishLatencyMs: number | null;
+  firstTranslatedLatencyMs: number | null;
   lastError: { message: string; at: number } | null;
 };
 
@@ -28,31 +34,35 @@ type ViewerSocket = {
 type PublicSession = {
   status: PublicSessionStatus;
   original: string;
-  spanish: string;
+  translated: string;
+  sourceLanguage: LiveLanguage;
+  targetLanguage: LiveLanguage;
   viewers: Set<ViewerSocket>;
   lastUpdatedAt: number | null;
   lastOriginalAt: number | null;
-  lastSpanishAt: number | null;
+  lastTranslatedAt: number | null;
   firstOriginalLatencyMs: number | null;
-  firstSpanishLatencyMs: number | null;
+  firstTranslatedLatencyMs: number | null;
   lastError: { message: string; at: number } | null;
 };
 
 export class PublicSessionState {
   private readonly sessions = new Map<string, PublicSession>();
 
-  constructor(sessionIds: string[]) {
+  constructor(sessionIds: string[], private readonly defaultSourceLanguage: LiveLanguage, private readonly defaultTargetLanguage: LiveLanguage) {
     for (const sessionId of sessionIds) {
       this.sessions.set(sessionId, {
         status: "offline",
         original: "",
-        spanish: "",
+        translated: "",
+        sourceLanguage: defaultSourceLanguage,
+        targetLanguage: defaultTargetLanguage,
         viewers: new Set(),
         lastUpdatedAt: null,
         lastOriginalAt: null,
-        lastSpanishAt: null,
+        lastTranslatedAt: null,
         firstOriginalLatencyMs: null,
-        firstSpanishLatencyMs: null,
+        firstTranslatedLatencyMs: null,
         lastError: null,
       });
     }
@@ -76,10 +86,12 @@ export class PublicSessionState {
     this.broadcast(sessionId, session);
   }
 
-  beginRun(sessionId: string) {
+  beginRun(sessionId: string, sourceLanguage: LiveLanguage, targetLanguage: LiveLanguage) {
     const session = this.requireSession(sessionId);
     session.firstOriginalLatencyMs = null;
-    session.firstSpanishLatencyMs = null;
+    session.firstTranslatedLatencyMs = null;
+    session.sourceLanguage = sourceLanguage;
+    session.targetLanguage = targetLanguage;
     session.lastError = null;
     session.status = "live";
     session.lastUpdatedAt = Date.now();
@@ -96,13 +108,13 @@ export class PublicSessionState {
     this.broadcast(sessionId, session);
   }
 
-  setSpanish(sessionId: string, spanish: string, firstLatencyMs: number | null = null) {
+  setTranslated(sessionId: string, translated: string, firstLatencyMs: number | null = null) {
     const session = this.requireSession(sessionId);
-    session.spanish = spanish;
+    session.translated = translated;
     const now = Date.now();
-    session.lastSpanishAt = now;
+    session.lastTranslatedAt = now;
     session.lastUpdatedAt = now;
-    if (session.firstSpanishLatencyMs === null && firstLatencyMs !== null) session.firstSpanishLatencyMs = firstLatencyMs;
+    if (session.firstTranslatedLatencyMs === null && firstLatencyMs !== null) session.firstTranslatedLatencyMs = firstLatencyMs;
     this.broadcast(sessionId, session);
   }
 
@@ -122,12 +134,14 @@ export class PublicSessionState {
     return {
       sessionId,
       status: session.status,
+      sourceLanguage: session.sourceLanguage,
+      targetLanguage: session.targetLanguage,
       viewerCount: session.viewers.size,
       lastUpdatedAt: session.lastUpdatedAt,
       lastOriginalAt: session.lastOriginalAt,
-      lastSpanishAt: session.lastSpanishAt,
+      lastTranslatedAt: session.lastTranslatedAt,
       firstOriginalLatencyMs: session.firstOriginalLatencyMs,
-      firstSpanishLatencyMs: session.firstSpanishLatencyMs,
+      firstTranslatedLatencyMs: session.firstTranslatedLatencyMs,
       lastError: session.lastError,
     };
   }
@@ -144,7 +158,15 @@ export class PublicSessionState {
   }
 
   private message(type: PublicSessionMessage["type"], sessionId: string, session: PublicSession): PublicSessionMessage {
-    return { type, sessionId, status: session.status, original: session.original, spanish: session.spanish };
+    return {
+      type,
+      sessionId,
+      status: session.status,
+      original: session.original,
+      translated: session.translated,
+      sourceLanguage: session.sourceLanguage,
+      targetLanguage: session.targetLanguage,
+    };
   }
 
   private requireSession(sessionId: string) {

@@ -1,5 +1,6 @@
 import { Storage } from "@google-cloud/storage";
 import { randomUUID } from "node:crypto";
+import { languageLabel, type LiveLanguage } from "./target-language.js";
 
 export type TranscriptStorageStatus = "pending" | "stored" | "memory-only" | "failed";
 
@@ -9,7 +10,9 @@ export type TranscriptRun = {
   startedAt: number;
   endedAt: number | null;
   originalText: string;
-  spanishText: string;
+  translatedText: string;
+  sourceLanguage: LiveLanguage;
+  targetLanguage: LiveLanguage;
   storageStatus: TranscriptStorageStatus;
 };
 
@@ -50,13 +53,13 @@ export function renderTranscriptTxt(run: TranscriptRun) {
     `Started: ${new Date(run.startedAt).toISOString()}`,
     `Ended: ${endedAt}`,
     "",
-    "=== ORIGINAL ===",
+    `=== ORIGINAL (${languageLabel(run.sourceLanguage)}) ===`,
     "",
     run.originalText,
     "",
-    "=== ESPAÑOL ===",
+    `=== TRANSLATED (${languageLabel(run.targetLanguage)}) ===`,
     "",
-    run.spanishText,
+    run.translatedText,
     "",
   ].join("\n");
 }
@@ -93,7 +96,7 @@ export class TranscriptStore {
     this.onStorageFailure = options.onStorageFailure;
   }
 
-  start(sessionId: string, startedAt = Date.now()) {
+  start(sessionId: string, sourceLanguage: LiveLanguage, targetLanguage: LiveLanguage, startedAt = Date.now()) {
     this.finish(sessionId, startedAt);
     const run: TranscriptRun = {
       id: transcriptId(startedAt),
@@ -101,7 +104,9 @@ export class TranscriptStore {
       startedAt,
       endedAt: null,
       originalText: "",
-      spanishText: "",
+      translatedText: "",
+      sourceLanguage,
+      targetLanguage,
       storageStatus: this.storage ? "pending" : "memory-only",
     };
     this.activeRuns.set(sessionId, run);
@@ -113,9 +118,9 @@ export class TranscriptStore {
     if (run && text) run.originalText = appendTranscriptDelta(run.originalText, text);
   }
 
-  appendSpanish(sessionId: string, text: string) {
+  appendTranslated(sessionId: string, text: string) {
     const run = this.activeRuns.get(sessionId);
-    if (run && text) run.spanishText = appendTranscriptDelta(run.spanishText, text);
+    if (run && text) run.translatedText = appendTranscriptDelta(run.translatedText, text);
   }
 
   finish(sessionId: string, endedAt = Date.now()) {
@@ -136,7 +141,7 @@ export class TranscriptStore {
   monitoring(sessionId: string): TranscriptMonitoring {
     const run = this.latest(sessionId);
     return {
-      available: Boolean(run && (run.originalText || run.spanishText)),
+      available: Boolean(run && (run.originalText || run.translatedText)),
       storageStatus: run?.storageStatus ?? null,
     };
   }

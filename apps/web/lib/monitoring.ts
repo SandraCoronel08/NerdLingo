@@ -1,17 +1,20 @@
 import { backendHttpUrl } from "./backend-url";
+import type { LiveLanguage } from "./target-language";
 
 export type SessionId = "stage-1" | "stage-2";
 
 export type StageMonitoring = {
   sessionId: SessionId;
   status: "offline" | "live";
+  sourceLanguage: LiveLanguage;
+  targetLanguage: LiveLanguage;
   producerConnected: boolean;
   viewerCount: number;
   lastUpdatedAt: number | null;
   lastOriginalAt: number | null;
-  lastSpanishAt: number | null;
+  lastTranslatedAt: number | null;
   firstOriginalLatencyMs: number | null;
-  firstSpanishLatencyMs: number | null;
+  firstTranslatedLatencyMs: number | null;
   lastError: { message: string; at: number } | null;
   transcript: { available: boolean; storageStatus: "pending" | "stored" | "memory-only" | "failed" | null };
 };
@@ -22,13 +25,15 @@ export function emptyStageMonitoring(sessionId: SessionId): StageMonitoring {
   return {
     sessionId,
     status: "offline",
+    sourceLanguage: "en",
+    targetLanguage: "es",
     producerConnected: false,
     viewerCount: 0,
     lastUpdatedAt: null,
     lastOriginalAt: null,
-    lastSpanishAt: null,
+    lastTranslatedAt: null,
     firstOriginalLatencyMs: null,
-    firstSpanishLatencyMs: null,
+    firstTranslatedLatencyMs: null,
     lastError: null,
     transcript: { available: false, storageStatus: null },
   };

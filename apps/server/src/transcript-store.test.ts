@@ -4,22 +4,25 @@ import { TranscriptStore, renderTranscriptTxt } from "./transcript-store.js";
 
 test("keeps closed runs isolated by session and starts a clean replacement run", () => {
   const store = new TranscriptStore();
-  store.start("stage-1", 1_000);
+  store.start("stage-1", "en", "es", 1_000);
   store.appendOriginal("stage-1", "Hello");
   store.appendOriginal("stage-1", "world.");
-  store.appendSpanish("stage-1", "Hola mundo.");
+  store.appendTranslated("stage-1", "Hola mundo.");
   store.finish("stage-1", 2_000);
 
-  store.start("stage-2", 1_500);
+  store.start("stage-2", "es", "en", 1_500);
   store.appendOriginal("stage-2", "Independent stage.");
   store.finish("stage-2", 2_500);
 
   const firstRun = store.latest("stage-1");
   assert.equal(firstRun?.originalText, "Hello world.");
-  assert.equal(firstRun?.spanishText, "Hola mundo.");
+  assert.equal(firstRun?.translatedText, "Hola mundo.");
+  assert.match(renderTranscriptTxt(firstRun!), /=== ORIGINAL \(English\) ===/);
+  assert.match(renderTranscriptTxt(firstRun!), /=== TRANSLATED \(Spanish\) ===/);
+  assert.equal(firstRun?.targetLanguage, "es");
   assert.equal(store.latest("stage-2")?.originalText, "Independent stage.");
 
-  store.start("stage-1", 3_000);
+  store.start("stage-1", "es", "en", 3_000);
   store.appendOriginal("stage-1", "New run.");
   store.finish("stage-1", 4_000);
   assert.equal(store.latest("stage-1")?.originalText, "New run.");
@@ -27,14 +30,14 @@ test("keeps closed runs isolated by session and starts a clean replacement run",
 
 test("renders the required UTF-8 TXT structure and uses memory-only fallback", () => {
   const store = new TranscriptStore();
-  store.start("stage-1", Date.parse("2026-09-25T09:10:20.123Z"));
+  store.start("stage-1", "es", "en", Date.parse("2026-09-25T09:10:20.123Z"));
   store.appendOriginal("stage-1", "Original text.");
-  store.appendSpanish("stage-1", "Texto en español.");
+  store.appendTranslated("stage-1", "Translated text.");
   const run = store.finish("stage-1", Date.parse("2026-09-25T09:10:25.123Z"));
   assert.equal(run?.storageStatus, "memory-only");
   assert.match(renderTranscriptTxt(run!), /Session: stage-1/);
-  assert.match(renderTranscriptTxt(run!), /=== ORIGINAL ===\n\nOriginal text\./);
-  assert.match(renderTranscriptTxt(run!), /=== ESPAÑOL ===\n\nTexto en español\./);
+  assert.match(renderTranscriptTxt(run!), /=== ORIGINAL \(Spanish\) ===\n\nOriginal text\./);
+  assert.match(renderTranscriptTxt(run!), /=== TRANSLATED \(English\) ===\n\nTranslated text\./);
 });
 
 test("keeps the closed transcript in memory when object storage fails", async () => {
@@ -43,7 +46,7 @@ test("keeps the closed transcript in memory when object storage fails", async ()
     storage: { save: async () => { throw new Error("simulated storage failure"); } },
     onStorageFailure: () => { failureReported = true; },
   });
-  store.start("stage-1", 1_000);
+  store.start("stage-1", "en", "es", 1_000);
   store.appendOriginal("stage-1", "Still exportable.");
   store.finish("stage-1", 2_000);
 

@@ -6,16 +6,20 @@ import { useEffect, useState } from "react";
 import { BrandMark } from "../../../components/brand-mark";
 import { StatusBadge } from "../../../components/monitoring-ui";
 import { backendWebSocketUrl } from "../../../lib/backend-url";
+import { audienceLanguageLabels } from "../../../lib/caption-language";
+import type { LiveLanguage } from "../../../lib/target-language";
 
 type SessionId = "stage-1" | "stage-2";
-type Language = "original" | "spanish";
+type Language = "original" | "translated";
 type AudienceState = {
   status: "offline" | "live";
   original: string;
-  spanish: string;
+  translated: string;
+  sourceLanguage: LiveLanguage;
+  targetLanguage: LiveLanguage;
 };
 
-const emptyState: AudienceState = { status: "offline", original: "", spanish: "" };
+const emptyState: AudienceState = { status: "offline", original: "", translated: "", sourceLanguage: "en", targetLanguage: "es" };
 
 function audienceSessionId(value: string | string[] | undefined): SessionId {
   return value === "stage-2" ? "stage-2" : "stage-1";
@@ -32,7 +36,7 @@ export default function AudienceSession() {
 }
 
 function AudienceSessionView({ sessionId }: { sessionId: SessionId }) {
-  const [language, setLanguage] = useState<Language>("spanish");
+  const [language, setLanguage] = useState<Language>("translated");
   const [state, setState] = useState<AudienceState>(emptyState);
   const [connected, setConnected] = useState(false);
 
@@ -47,9 +51,9 @@ function AudienceSessionView({ sessionId }: { sessionId: SessionId }) {
       socket.onmessage = (event) => {
         if (typeof event.data !== "string") return;
         try {
-          const message = JSON.parse(event.data) as { sessionId?: string; status?: AudienceState["status"]; original?: string; spanish?: string };
+          const message = JSON.parse(event.data) as { sessionId?: string; status?: AudienceState["status"]; original?: string; translated?: string; sourceLanguage?: LiveLanguage; targetLanguage?: LiveLanguage };
           if (message.sessionId !== sessionId || (message.status !== "live" && message.status !== "offline")) return;
-          setState({ status: message.status, original: message.original ?? "", spanish: message.spanish ?? "" });
+          setState({ status: message.status, original: message.original ?? "", translated: message.translated ?? "", sourceLanguage: message.sourceLanguage ?? "en", targetLanguage: message.targetLanguage ?? "es" });
         } catch {
           // Ignore malformed viewer messages; the next snapshot/update will repair state.
         }
@@ -68,8 +72,9 @@ function AudienceSessionView({ sessionId }: { sessionId: SessionId }) {
     };
   }, [sessionId]);
 
-  const caption = language === "original" ? state.original : state.spanish;
+  const caption = language === "original" ? state.original : state.translated;
   const stageLabel = sessionId === "stage-1" ? "Stage 1" : "Stage 2";
+  const labels = audienceLanguageLabels(state.sourceLanguage, state.targetLanguage);
 
   return (
     <main className="nerdlingo-shell min-h-screen px-5 py-7 text-white sm:px-8 sm:py-10">
@@ -91,10 +96,10 @@ function AudienceSessionView({ sessionId }: { sessionId: SessionId }) {
 
         <section className="mt-5 inline-flex w-fit rounded-xl border border-white/15 bg-black/25 p-1.5" aria-label="Caption language">
           <button aria-pressed={language === "original"} className={`min-h-11 rounded-lg px-4 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-[#FFBA00] ${language === "original" ? "bg-[#FFBA00] text-[#1A1A1A]" : "text-[#D8E3E6] hover:bg-white/10"}`} onClick={() => setLanguage("original")}>
-            Original (English)
+            {labels.original}
           </button>
-          <button aria-pressed={language === "spanish"} className={`min-h-11 rounded-lg px-4 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-[#FFBA00] ${language === "spanish" ? "bg-[#FFBA00] text-[#1A1A1A]" : "text-[#D8E3E6] hover:bg-white/10"}`} onClick={() => setLanguage("spanish")}>
-            Español
+          <button aria-pressed={language === "translated"} className={`min-h-11 rounded-lg px-4 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-[#FFBA00] ${language === "translated" ? "bg-[#FFBA00] text-[#1A1A1A]" : "text-[#D8E3E6] hover:bg-white/10"}`} onClick={() => setLanguage("translated")}>
+            {labels.translated}
           </button>
         </section>
 

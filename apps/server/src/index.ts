@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { GoogleGenAI, Modality, ThinkingLevel, type Session } from "@google/genai";
 import { WebSocket, WebSocketServer } from "ws";
 import { PublicSessionState } from "./public-session-state.js";
+import { defaultLanguageSelection, languageLabel, languageSelectionFromAudioStart, type LiveLanguage } from "./target-language.js";
 import { TranscriptStore, createGcsTranscriptStorageFromEnv, renderTranscriptTxt } from "./transcript-store.js";
 
 for (const envPath of [resolve(process.cwd(), ".env"), resolve(process.cwd(), "..", "..", ".env")]) {
@@ -37,7 +38,7 @@ type ProducerOwner = {
 };
 
 const activeProducers = new Map<string, ProducerOwner>();
-const publicSessions = new PublicSessionState(allowedSessionIds);
+const publicSessions = new PublicSessionState(allowedSessionIds, defaultLanguageSelection.sourceLanguage, defaultLanguageSelection.targetLanguage);
 const transcriptRuns = new TranscriptStore({
   storage: createGcsTranscriptStorageFromEnv(process.env),
   onStorageFailure: (sessionId) => publicSessions.setError(sessionId, "Transcript storage failed; the in-memory export remains available."),
@@ -122,8 +123,8 @@ type OperatorMessage =
   | { type: "translation.interim"; text: string; translationLatencyMs: number; firstChunkToTranslationMs: number | null }
   | { type: "translation.final"; text: string; translationLatencyMs: number }
   | { type: "translation.error"; message: string }
-  | { type: "liveTranslate.connecting" }
-  | { type: "liveTranslate.connected"; connectLatencyMs: number | null }
+  | { type: "liveTranslate.connecting"; sourceLanguage: LiveLanguage; targetLanguage: LiveLanguage }
+  | { type: "liveTranslate.connected"; connectLatencyMs: number | null; sourceLanguage: LiveLanguage; targetLanguage: LiveLanguage }
   | { type: "liveTranslate.error"; message: string }
   | { type: "liveTranslate.drain.complete" }
   | { type: "session.error"; code: "SESSION_BUSY"; message: string }
@@ -235,7 +236,7 @@ const server = createServer((request, response) => {
       return;
     }
     const run = transcriptRuns.latest(sessionId);
-    if (!run || (!run.originalText && !run.spanishText)) {
+    if (!run || (!run.originalText && !run.translatedText)) {
       response.writeHead(404, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: "No transcript is available for this session" }));
       return;
@@ -303,6 +304,8 @@ audioServer.on("connection", (socket, request) => {
   const id = `[${sessionId}][audio ${connectionId}]`;
   const websocketOpenedAt = Date.now();
   let audioMode: AudioMode = "legacy";
+  let sourceLanguage: LiveLanguage = defaultLanguageSelection.sourceLanguage;
+  let targetLanguage: LiveLanguage = defaultLanguageSelection.targetLanguage;
   let audioStartAt: number | undefined;
   let geminiConnectStartedAt: number | undefined;
   let geminiConnectedAt: number | undefined;
@@ -376,14 +379,14 @@ audioServer.on("connection", (socket, request) => {
       if (message.type === "transcript.final") transcriptRuns.appendOriginal(sessionId, message.text);
     }
     if (message.type === "liveTranslate.output") {
-      publicSessions.setSpanish(sessionId, message.text, message.firstAudioLatencyMs);
+      publicSessions.setTranslated(sessionId, message.text, message.firstAudioLatencyMs);
     }
     if (message.type === "translation.interim") {
-      publicSessions.setSpanish(sessionId, message.text, message.firstChunkToTranslationMs);
+      publicSessions.setTranslated(sessionId, message.text, message.firstChunkToTranslationMs);
     }
     if (message.type === "translation.final") {
-      publicSessions.setSpanish(sessionId, message.text);
-      transcriptRuns.appendSpanish(sessionId, message.text);
+      publicSessions.setTranslated(sessionId, message.text);
+      transcriptRuns.appendTranslated(sessionId, message.text);
     }
   };
 
@@ -446,7 +449,7 @@ audioServer.on("connection", (socket, request) => {
         },
       }).models.generateContent({
         model: translationModel,
-        contents: `Translate from English to Spanish. Preserve technical terms and proper names. Do not explain or summarize. Return only the translation.\n\n${text}`,
+        contents: `Translate into ${languageLabel(targetLanguage)}. Preserve technical terms and proper names. Do not explain or summarize. Return only the translation.\n\n${text}`,
         config: {
           thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
           temperature: 0,
@@ -589,14 +592,14 @@ audioServer.on("connection", (socket, request) => {
     }
 
     liveTranslateConnectStartedAt = Date.now();
-    sendToOperator({ type: "liveTranslate.connecting" });
+    sendToOperator({ type: "liveTranslate.connecting", sourceLanguage, targetLanguage });
     geminiSessionPromise = new GoogleGenAI({ apiKey }).live.connect({
       model: liveTranslateModel,
       config: {
         responseModalities: [Modality.AUDIO],
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        translationConfig: { targetLanguageCode: "es", echoTargetLanguage: false },
+        translationConfig: { targetLanguageCode: targetLanguage, echoTargetLanguage: false },
       },
       callbacks: {
         onmessage: (message) => {
@@ -631,7 +634,7 @@ audioServer.on("connection", (socket, request) => {
             outputTranscriptEventCount += 1;
             console.log(`[audio ${id}] Live Translate output`, { text: JSON.stringify(output.text), finished: output.finished ?? false, turnComplete: content.turnComplete ?? false, generationComplete: content.generationComplete ?? false, interrupted: content.interrupted ?? false });
             liveTranslateOutputBuffer = appendTranscriptDelta(liveTranslateOutputBuffer, output.text);
-            transcriptRuns.appendSpanish(sessionId, output.text);
+            transcriptRuns.appendTranslated(sessionId, output.text);
             sendToOperator({ type: "liveTranslate.output", text: liveTranslateOutputBuffer, finished: false, firstAudioLatencyMs: firstAudioSentToLiveTranslateAt ? now - firstAudioSentToLiveTranslateAt : null });
             if (output.finished) finalizeLiveTranslateOutput(now);
           }
@@ -678,7 +681,7 @@ audioServer.on("connection", (socket, request) => {
     geminiSession = connectedSession;
     liveTranslateConnectedAt = Date.now();
     console.log(`[audio ${id}] Gemini Live Translate session opened`);
-    sendToOperator({ type: "liveTranslate.connected", connectLatencyMs: liveTranslateConnectStartedAt ? liveTranslateConnectedAt - liveTranslateConnectStartedAt : null });
+    sendToOperator({ type: "liveTranslate.connected", connectLatencyMs: liveTranslateConnectStartedAt ? liveTranslateConnectedAt - liveTranslateConnectStartedAt : null, sourceLanguage, targetLanguage });
     while (pendingAudio.length > 0) sendAudioToGemini(pendingAudio.shift()!);
     return connectedSession;
   };
@@ -873,7 +876,7 @@ audioServer.on("connection", (socket, request) => {
   socket.on("message", (data, isBinary) => {
     if (!isBinary) {
       try {
-        const control = JSON.parse(data.toString()) as { type?: string; mode?: AudioMode };
+        const control = JSON.parse(data.toString()) as { type?: string; mode?: AudioMode; sourceLanguage?: string; targetLanguage?: string };
         if (control.type === "audio.start") {
           if (audioStartAt || audioInputStopped) return;
           const activeProducer = activeProducers.get(sessionId);
@@ -910,8 +913,9 @@ audioServer.on("connection", (socket, request) => {
           activeProducers.set(sessionId, { connectionId, socket, reservedAt });
           console.log(`[${sessionId}] producer reserved`, { connectionId, reservedAt: new Date(reservedAt).toISOString() });
           audioStartAt ??= Date.now();
-          publicSessions.beginRun(sessionId);
-          transcriptRuns.start(sessionId, audioStartAt);
+          ({ sourceLanguage, targetLanguage } = languageSelectionFromAudioStart(control.sourceLanguage, control.targetLanguage));
+          publicSessions.beginRun(sessionId, sourceLanguage, targetLanguage);
+          transcriptRuns.start(sessionId, sourceLanguage, targetLanguage, audioStartAt);
           audioMode = control.mode === "live-translate" ? "live-translate" : "legacy";
           console.log(`[audio ${id}] control: audio.start`);
           void openGeminiSession().catch(() => {

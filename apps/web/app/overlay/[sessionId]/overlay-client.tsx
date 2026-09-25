@@ -2,13 +2,15 @@
 
 import { useEffect, useState } from "react";
 import { backendWebSocketUrl } from "../../../lib/backend-url";
+import { overlayCaption, type OverlayLanguage } from "../../../lib/caption-language";
+import type { LiveLanguage } from "../../../lib/target-language";
 
 type SessionId = "stage-1" | "stage-2";
-type OverlayLanguage = "es" | "original";
 type OverlayState = {
   status: "offline" | "live";
   original: string;
-  spanish: string;
+  translated: string;
+  targetLanguage: LiveLanguage;
 };
 
 const maxWordsPerCaptionBlock = 8;
@@ -84,11 +86,12 @@ export default function OverlayClient({ sessionId, language }: { sessionId: Sess
             sessionId?: string;
             status?: OverlayState["status"];
             original?: string;
-            spanish?: string;
+            translated?: string;
+            targetLanguage?: LiveLanguage;
           };
           if (message.sessionId !== sessionId || (message.status !== "live" && message.status !== "offline")) return;
-          const nextState = { status: message.status, original: message.original ?? "", spanish: message.spanish ?? "" };
-          const nextCaption = language === "original" ? nextState.original : nextState.spanish;
+          const nextState = { status: message.status, original: message.original ?? "", translated: message.translated ?? "", targetLanguage: message.targetLanguage ?? "es" };
+          const nextCaption = overlayCaption(language, nextState);
           setLines((current) => reconcileCaptionLines(current, desiredLines(nextState.status === "live" ? captionUnits(nextCaption) : [])));
         } catch {
           // Ignore malformed viewer messages; a snapshot or later update repairs the overlay.

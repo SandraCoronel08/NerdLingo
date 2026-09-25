@@ -2,7 +2,7 @@
 
 Open-source real-time transcription and translation for multi-stage conferences.
 
-NerdLingo captures live conference audio from the browser, transcribes the original speech in real time, and translates English to Spanish with Gemini Live Translate. It is designed for conferences running multiple simultaneous stages.
+NerdLingo captures live conference audio from the browser, transcribes the original speech in real time, and translates English to Spanish or Spanish to English with Gemini Live Translate. It is designed for conferences running multiple simultaneous stages.
 
 Built for Nerdearla Vibeathon 2026.
 
@@ -22,7 +22,7 @@ The browser captures the selected operating-system audio input through `getUserM
 
 - Live browser audio capture with selectable audio input.
 - Mono, 16 kHz, signed 16-bit little-endian PCM pipeline.
-- Gemini Live Translate for real-time original transcription and English → Spanish translation.
+- Gemini Live Translate for real-time original transcription and bilingual English ↔ Spanish translation.
 - Independent `stage-1` and `stage-2` producers.
 - One active producer per stage, with stale-producer cleanup.
 - Operator UI with input guidance, operational status, technical metrics, and graceful Stop/drain.
@@ -97,13 +97,15 @@ The production translation path uses:
 - SDK: `@google/genai` `2.24.0`
 - `inputAudioTranscription`
 - `outputAudioTranscription`
-- `translationConfig` with `targetLanguageCode: "es"`
+- Per-run `translationConfig` with the operator-selected target language.
+
+Supported bilingual modes are English → Spanish and Spanish → English. The operator declares the expected source language for labels and validation; Gemini continues detecting the actual source audio. Target language is configured for each new run, and source and target cannot be equal.
 
 The Gemini API key remains server-side. The browser never connects directly to Gemini or receives the key.
 
 ## Observed Latency
 
-These are observations from development tests, not universal benchmarks or an SLA. Healthy Live Translate runs commonly produced first Original and Spanish captions in approximately 3–5 seconds.
+These are observations from development tests, not universal benchmarks or an SLA. Healthy Live Translate runs commonly produced first Original and translated captions in approximately 3–5 seconds.
 
 - Local development example: Original ~3.4 s, Spanish ~3.6 s.
 - Public deployment example: Original ~3.1 s, Spanish ~3.3 s.
@@ -242,7 +244,7 @@ Cloud Run is a possible future deployment target because it supports long-lived 
 2. Open the operator page for the intended stage.
 3. Click **Enable audio inputs** if browser permission is required.
 4. Select the relevant Line In, USB Audio device, audio interface, or microphone.
-5. Keep **Live Translate (recommended)** selected.
+5. Keep **Live Translate (recommended)** selected and choose the expected Source language and Translation language.
 6. Click **Start audio**.
 7. Audience members open the appropriate session page on mobile.
 8. At the end of the talk, click **Stop audio** and allow the transcription drain to finish.
@@ -252,7 +254,7 @@ Cloud Run is a possible future deployment target because it supports long-lived 
 Audience members can:
 
 - Choose Stage 1 or Stage 2.
-- Switch between Original and Español captions.
+- Switch between Original and the dynamically labeled translated caption.
 - Join an active session and receive the latest public caption state.
 
 The audience UI is mobile-friendly, and viewers do not create Gemini sessions.
@@ -265,12 +267,14 @@ Available routes:
 
 ```text
 /overlay/stage-1?lang=es
+/overlay/stage-1?lang=en
 /overlay/stage-1?lang=original
 /overlay/stage-2?lang=es
+/overlay/stage-2?lang=en
 /overlay/stage-2?lang=original
 ```
 
-Use `lang=es` for Spanish captions or `lang=original` for the original transcription. The overlay displays a short, recent caption window rather than the complete transcript, keeping the newest spoken text readable for burn-in.
+Use `lang=original` for the original transcription, `lang=es` for a Spanish target, or `lang=en` for an English target. The overlay displays a short, recent caption window rather than the complete transcript, keeping the newest spoken text readable for burn-in.
 
 ```text
 OBS:  Sources → Browser → overlay URL
@@ -299,7 +303,7 @@ Long-form technical English containing terms such as GPL, WordPress, PHP, BSD, M
 - The public deployment exposes only `stage-1` and `stage-2`.
 - Technical proper names can still be misrecognized.
 - Gemini Live Translate is preview technology.
-- The production path currently validated is English → Spanish.
+- Supported production modes are English → Spanish and Spanish → English.
 - VTT/SRT are intentionally deferred until reliable audio-alignment timestamps exist.
 
 ## Roadmap
