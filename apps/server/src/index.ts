@@ -16,8 +16,8 @@ for (const envPath of [resolve(process.cwd(), ".env"), resolve(process.cwd(), ".
 const port = Number(process.env.PORT ?? 3001);
 const pcmBytesPerSecond = 16_000 * 2;
 const geminiModel = "gemini-3.5-transcribe-live";
-// Allow Gemini Live to flush the final input transcription before closing.
-const geminiCloseDelayMs = 3_000;
+// Keep the Live Translate session open long enough to receive its terminal turn.
+const geminiCloseDelayMs = 10_000;
 const pendingAudioLimit = 5;
 const translationModel = "gemini-3.5-flash-lite";
 const interimTranslationIntervalMs = 1_000;
@@ -120,6 +120,7 @@ type OperatorMessage =
   | { type: "liveTranslate.connecting" }
   | { type: "liveTranslate.connected"; connectLatencyMs: number | null }
   | { type: "liveTranslate.error"; message: string }
+  | { type: "liveTranslate.drain.complete" }
   | { type: "session.error"; code: "SESSION_BUSY"; message: string }
   | { type: "liveTranslate.input"; text: string; finished: boolean; firstAudioLatencyMs: number | null }
   | { type: "liveTranslate.output"; text: string; finished: boolean; firstAudioLatencyMs: number | null };
@@ -315,6 +316,7 @@ audioServer.on("connection", (socket, request) => {
   let geminiCloseTimer: NodeJS.Timeout | undefined;
   const pendingAudio: Buffer[] = [];
   let pendingLiveTranslateAudio = Buffer.alloc(0);
+  let liveTranslateDrainCompleteSent = false;
 
   monitorHeartbeat(socket, { kind: "producer", sessionId, connectionId });
 
@@ -348,6 +350,14 @@ audioServer.on("connection", (socket, request) => {
       firstAudioLatencyMs: firstAudioSentToLiveTranslateAt ? now - firstAudioSentToLiveTranslateAt : null,
     });
     liveTranslateOutputBuffer = "";
+  };
+
+  const completeLiveTranslateDrain = (now = Date.now()) => {
+    finalizeLiveTranslateInput(now);
+    finalizeLiveTranslateOutput(now);
+    if (!audioInputStopped || liveTranslateDrainCompleteSent) return;
+    liveTranslateDrainCompleteSent = true;
+    sendToOperator({ type: "liveTranslate.drain.complete" });
   };
 
   const translateText = async (text: string, kind: TranslationKind, interimVersion?: number, attempt = 0) => {
@@ -489,8 +499,7 @@ audioServer.on("connection", (socket, request) => {
     geminiCloseTimer = undefined;
     geminiClosing = true;
     if (audioMode === "live-translate") {
-      finalizeLiveTranslateInput();
-      finalizeLiveTranslateOutput();
+      completeLiveTranslateDrain();
     }
     if (geminiSession) {
       geminiSession.close();
@@ -572,6 +581,10 @@ audioServer.on("connection", (socket, request) => {
             finalizeLiveTranslateInput(now);
           }
           if (content.turnComplete || content.interrupted) finalizeLiveTranslateOutput(now);
+          if ((content.turnComplete || content.generationComplete || content.interrupted) && audioInputStopped) {
+            completeLiveTranslateDrain(now);
+            closeGeminiSession();
+          }
           // Translated audio (modelTurn.inlineData) is intentionally discarded.
         },
         onerror: (error) => {

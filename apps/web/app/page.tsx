@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { backendWebSocketUrl } from "../lib/backend-url";
 
-type StreamStatus = "Idle" | "Requesting permission" | "Connecting" | "Streaming" | "Stopped" | "Error";
+type StreamStatus = "Idle" | "Requesting permission" | "Connecting" | "Streaming" | "Finishing transcription…" | "Stopped" | "Error";
 type GeminiStatus = "Not connected" | "Connecting" | "Connected" | "Error";
 type AudioMode = "legacy" | "live-translate";
 type CapturePhase = "idle" | "connecting" | "capturing" | "stopping";
@@ -13,6 +13,7 @@ type SessionId = "stage-1" | "stage-2";
 type CaptureRun = {
   id: number;
   cancelled: boolean;
+  draining: boolean;
   socket?: WebSocket;
   stream?: MediaStream;
   context?: AudioContext;
@@ -60,7 +61,7 @@ const initialStats: StreamStats = {
   liveTranslateOutputEvents: 0,
 };
 
-const translationFinalizationWindowMs = 12_000;
+const liveTranslateDrainTimeoutMs = 10_000;
 
 function audioWebSocketUrl(sessionId: SessionId) {
   return backendWebSocketUrl("/audio", sessionId);
@@ -73,7 +74,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [stats, setStats] = useState<StreamStats>(initialStats);
   const [geminiStatus, setGeminiStatus] = useState<GeminiStatus>("Not connected");
-  const [audioMode, setAudioMode] = useState<AudioMode>("legacy");
+  const [audioMode, setAudioMode] = useState<AudioMode>("live-translate");
   const [interimTranscript, setInterimTranscript] = useState("");
   const [finalTranscripts, setFinalTranscripts] = useState<string[]>([]);
   const [interimTranslation, setInterimTranslation] = useState("");
@@ -132,10 +133,23 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
     }
   };
 
-  const isActiveRun = (run: CaptureRun) => activeRunRef.current === run && !run.cancelled;
+  const isCurrentRun = (run: CaptureRun) => activeRunRef.current === run && !run.cancelled;
+  const isCapturingRun = (run: CaptureRun) => isCurrentRun(run) && !run.draining;
 
-  const releaseRun = (run: CaptureRun, finalizationWindowMs = 0) => {
+  const finishRun = (run: CaptureRun, closeSocket = false) => {
+    if (!isCurrentRun(run)) return;
+    if (run.closeTimer) window.clearTimeout(run.closeTimer);
     run.cancelled = true;
+    activeRunRef.current = null;
+    if (closeSocket && run.socket?.readyState === WebSocket.OPEN) {
+      run.socket.close(1000, "Audio session finalized");
+    }
+    setGeminiStatus("Not connected");
+    setStatus("Idle");
+    setCapturePhase("idle");
+  };
+
+  const stopCapture = (run: CaptureRun, finalizationWindowMs = 0) => {
     run.worklet?.disconnect();
     run.source?.disconnect();
     run.silent?.disconnect();
@@ -146,9 +160,9 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "audio.stop" }));
       if (finalizationWindowMs > 0) {
-        // Keep this detached socket alive only long enough to receive its final turn.
+        // Keep this run eligible for final Live Translate messages during the drain.
         run.closeTimer = window.setTimeout(() => {
-          if (socket.readyState === WebSocket.OPEN) socket.close(1000, "Audio session finalized");
+          finishRun(run, true);
         }, finalizationWindowMs);
       } else {
         socket.close(1000, "Operator stopped audio");
@@ -161,16 +175,19 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
   const stopAudio = (finalizationWindowMs = 0) => {
     const run = activeRunRef.current;
     if (!run) return;
-    setCapturePhase("stopping");
-    activeRunRef.current = null;
-    releaseRun(run, finalizationWindowMs);
-    setGeminiStatus("Not connected");
-    setStatus("Idle");
-    setCapturePhase("idle");
+    if (finalizationWindowMs > 0) {
+      run.draining = true;
+      setStatus("Finishing transcription…");
+      setCapturePhase("stopping");
+      stopCapture(run, finalizationWindowMs);
+      return;
+    }
+    stopCapture(run);
+    finishRun(run);
   };
 
   const failRun = (run: CaptureRun, message: string) => {
-    if (!isActiveRun(run)) return;
+    if (!isCurrentRun(run)) return;
     stopAudio();
     setError(message);
     setGeminiStatus("Error");
@@ -185,7 +202,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
     }
     if (activeRunRef.current) return;
 
-    const run: CaptureRun = { id: nextRunIdRef.current + 1, cancelled: false };
+    const run: CaptureRun = { id: nextRunIdRef.current + 1, cancelled: false, draining: false };
     nextRunIdRef.current = run.id;
     activeRunRef.current = run;
     const selectedDeviceForRun = selectedDeviceId;
@@ -210,7 +227,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
           autoGainControl: false,
         },
       });
-      if (!isActiveRun(run)) {
+      if (!isCurrentRun(run)) {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
@@ -225,7 +242,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
         failRun(run, "The selected audio device was disconnected or stopped.");
       });
       await refreshDevices();
-      if (!isActiveRun(run)) return;
+      if (!isCurrentRun(run)) return;
 
       setStatus("Connecting");
       const socket = new WebSocket(audioWebSocketUrl(sessionId));
@@ -234,13 +251,13 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
       let pipelineStarted = false;
 
       const startAudioPipeline = async () => {
-        if (pipelineStarted || !isActiveRun(run)) return;
+        if (pipelineStarted || !isCapturingRun(run)) return;
         pipelineStarted = true;
         try {
           const context = new AudioContext();
           run.context = context;
           await context.audioWorklet.addModule("/pcm-processor.js");
-          if (!isActiveRun(run)) {
+          if (!isCapturingRun(run)) {
             void context.close();
             return;
           }
@@ -257,7 +274,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
           run.silent = silent;
 
           worklet.port.onmessage = (message: MessageEvent<{ type: string; buffer: ArrayBuffer }>) => {
-            if (!isActiveRun(run) || message.data.type !== "pcm" || socket.readyState !== WebSocket.OPEN) return;
+            if (!isCapturingRun(run) || message.data.type !== "pcm" || socket.readyState !== WebSocket.OPEN) return;
             const now = new Date().toISOString();
             socket.send(message.data.buffer);
             setStats((current) => ({
@@ -273,7 +290,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
           source.connect(worklet);
           worklet.connect(silent).connect(context.destination);
           await context.resume();
-          if (!isActiveRun(run)) return;
+          if (!isCapturingRun(run)) return;
           setStats((current) => ({ ...current, captureStartedAt: new Date().toISOString() }));
           setStatus("Streaming");
           setCapturePhase("capturing");
@@ -284,7 +301,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
 
       socket.onerror = () => failRun(run, "Connection lost. Press Start to resume.");
       socket.onmessage = (event) => {
-        if (!isActiveRun(run)) return;
+        if (!isCurrentRun(run)) return;
         if (typeof event.data !== "string") return;
         try {
           const message = JSON.parse(event.data) as { type?: string; text?: string; message?: string; finished?: boolean; connectLatencyMs?: number | null; firstChunkLatencyMs?: number | null; translationLatencyMs?: number; firstChunkToTranslationMs?: number | null; firstAudioLatencyMs?: number | null };
@@ -337,6 +354,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
               firstLiveTranslateOutputLatencyMs: current.firstLiveTranslateOutputLatencyMs ?? message.firstAudioLatencyMs ?? null,
             }));
           }
+          if (message.type === "liveTranslate.drain.complete" && run.draining) finishRun(run, true);
           if (message.type === "transcript.interim") {
             setInterimTranscript(message.text ?? "");
             setStats((current) => ({ ...current, firstInterimLatencyMs: current.firstInterimLatencyMs ?? message.firstChunkLatencyMs ?? null }));
@@ -367,18 +385,23 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
         }
       };
       socket.onclose = (event) => {
-        if (event.code !== 1000) failRun(run, "Connection lost. Press Start to resume.");
+        if (!isCurrentRun(run)) return;
+        if (event.code !== 1000) {
+          failRun(run, "Connection lost. Press Start to resume.");
+          return;
+        }
+        finishRun(run);
       };
 
       socket.onopen = () => {
-        if (!isActiveRun(run)) {
+        if (!isCapturingRun(run)) {
           socket.close(1000, "Audio session cancelled");
           return;
         }
         socket.send(JSON.stringify({ type: "audio.start", mode: audioMode }));
       };
     } catch (cause) {
-      if (!isActiveRun(run)) return;
+      if (!isCurrentRun(run)) return;
       if (cause instanceof DOMException && cause.name === "NotAllowedError") {
         failRun(run, "Microphone permission was denied. Allow access and try again.");
       } else if (cause instanceof DOMException && cause.name === "NotFoundError") {
@@ -429,8 +452,8 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
             onChange={(event) => setAudioMode(event.target.value as AudioMode)}
             disabled={capturePhase !== "idle"}
           >
-            <option value="legacy">Legacy: Live transcription + text translation</option>
-            <option value="live-translate">Experimental: Gemini Live Translate</option>
+            <option value="live-translate">Live Translate (recommended)</option>
+            <option value="legacy">Legacy (debug): transcription + text translation</option>
           </select>
         </label>
         <button className="text-left text-sm text-slate-700 underline" onClick={() => void refreshDevices()} disabled={capturePhase !== "idle"}>
@@ -440,7 +463,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
           <button className="rounded bg-slate-900 px-4 py-2 text-white disabled:opacity-50" onClick={() => void startAudio()} disabled={capturePhase !== "idle"}>
             Start audio
           </button>
-          <button className="rounded border border-slate-300 px-4 py-2 disabled:opacity-50" onClick={() => stopAudio(translationFinalizationWindowMs)} disabled={capturePhase === "idle" || capturePhase === "stopping"}>
+          <button className="rounded border border-slate-300 px-4 py-2 disabled:opacity-50" onClick={() => stopAudio(liveTranslateDrainTimeoutMs)} disabled={capturePhase === "idle" || capturePhase === "stopping"}>
             Stop audio
           </button>
         </div>
@@ -454,24 +477,27 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
           <p>Capture started: {stats.captureStartedAt ?? "—"}</p>
           <p>First chunk sent: {stats.firstChunkSentAt ?? "—"}</p>
           <p>Last chunk sent: {stats.lastChunkSentAt ?? "—"}</p>
-          <p>Gemini connect: {stats.geminiConnectLatencyMs === null ? "—" : `${stats.geminiConnectLatencyMs} ms`}</p>
-          <p>First chunk → interim: {stats.firstInterimLatencyMs === null ? "—" : `${stats.firstInterimLatencyMs} ms`}</p>
-          <p>First chunk → final: {stats.firstFinalLatencyMs === null ? "—" : `${stats.firstFinalLatencyMs} ms`}</p>
-          <p>Final translation: {stats.translationLatencyMs === null ? "—" : `${stats.translationLatencyMs} ms`}</p>
-          <p>Interim translation: {stats.interimTranslationLatencyMs === null ? "—" : `${stats.interimTranslationLatencyMs} ms`}</p>
-          <p>First chunk → interim translation: {stats.firstInterimTranslationLatencyMs === null ? "—" : `${stats.firstInterimTranslationLatencyMs} ms`}</p>
           {audioMode === "live-translate" ? <>
+            <p className="font-medium text-slate-800">Live Translate metrics</p>
             <p>Live Translate connect: {stats.liveTranslateConnectLatencyMs === null ? "—" : `${stats.liveTranslateConnectLatencyMs} ms`}</p>
             <p>First audio → original: {stats.firstLiveTranslateInputLatencyMs === null ? "—" : `${stats.firstLiveTranslateInputLatencyMs} ms`}</p>
             <p>First audio → español: {stats.firstLiveTranslateOutputLatencyMs === null ? "—" : `${stats.firstLiveTranslateOutputLatencyMs} ms`}</p>
             <p>Live Translate input events: {stats.liveTranslateInputEvents}</p>
             <p>Live Translate output events: {stats.liveTranslateOutputEvents}</p>
-          </> : null}
+          </> : <>
+            <p className="font-medium text-slate-800">Legacy metrics</p>
+            <p>Gemini connect: {stats.geminiConnectLatencyMs === null ? "—" : `${stats.geminiConnectLatencyMs} ms`}</p>
+            <p>First chunk → interim: {stats.firstInterimLatencyMs === null ? "—" : `${stats.firstInterimLatencyMs} ms`}</p>
+            <p>First chunk → final: {stats.firstFinalLatencyMs === null ? "—" : `${stats.firstFinalLatencyMs} ms`}</p>
+            <p>Final translation: {stats.translationLatencyMs === null ? "—" : `${stats.translationLatencyMs} ms`}</p>
+            <p>Interim translation: {stats.interimTranslationLatencyMs === null ? "—" : `${stats.interimTranslationLatencyMs} ms`}</p>
+            <p>First chunk → interim translation: {stats.firstInterimTranslationLatencyMs === null ? "—" : `${stats.firstInterimTranslationLatencyMs} ms`}</p>
+          </>}
         </div>
       </section>
       <section className="space-y-4 rounded border border-slate-200 p-5">
         <div>
-          <p className="text-sm font-medium text-slate-600">Gemini Live</p>
+          <p className="text-sm font-medium text-slate-600">{audioMode === "live-translate" ? "Gemini Live Translate" : "Legacy Transcription + Translation"}</p>
           <p className="text-lg font-semibold">{geminiStatus}</p>
         </div>
         <div className="grid gap-5 md:grid-cols-2">
