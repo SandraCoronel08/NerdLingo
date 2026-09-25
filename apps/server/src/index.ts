@@ -26,6 +26,7 @@ const interimTranslationTimeoutMs = 2_500;
 const finalTranslationTimeoutMs = 7_500;
 const liveTranslateModel = "gemini-3.5-live-translate-preview";
 const liveTranslateChunkBytes = 3_840;
+const heartbeatIntervalMs = 25_000;
 const allowedSessionIds = ["stage-1", "stage-2"];
 const allowedSessionIdSet = new Set(allowedSessionIds);
 type ProducerOwner = {
@@ -36,6 +37,13 @@ type ProducerOwner = {
 
 const activeProducers = new Map<string, ProducerOwner>();
 const publicSessions = new PublicSessionState(allowedSessionIds);
+type HeartbeatConnection = {
+  kind: "producer" | "viewer";
+  sessionId: string;
+  connectionId?: string;
+  isAlive: boolean;
+};
+const heartbeatConnections = new Map<WebSocket, HeartbeatConnection>();
 let shuttingDown = false;
 
 function readyStateName(readyState: number) {
@@ -67,6 +75,38 @@ function releaseProducer(sessionId: string, connectionId: string, reason: string
   });
   return true;
 }
+
+function monitorHeartbeat(socket: WebSocket, connection: Omit<HeartbeatConnection, "isAlive">) {
+  const tracked = { ...connection, isAlive: true };
+  heartbeatConnections.set(socket, tracked);
+  socket.on("pong", () => {
+    const current = heartbeatConnections.get(socket);
+    if (current) current.isAlive = true;
+  });
+  const untrack = () => heartbeatConnections.delete(socket);
+  socket.once("close", untrack);
+  socket.once("error", untrack);
+}
+
+const heartbeatTimer = setInterval(() => {
+  for (const [socket, connection] of heartbeatConnections) {
+    if (socket.readyState !== WebSocket.OPEN) {
+      heartbeatConnections.delete(socket);
+      continue;
+    }
+    if (!connection.isAlive) {
+      heartbeatConnections.delete(socket);
+      console.warn(`[${connection.sessionId}] heartbeat timeout; terminating ${connection.kind}`, {
+        connectionId: connection.connectionId,
+      });
+      socket.terminate();
+      continue;
+    }
+    connection.isAlive = false;
+    socket.ping();
+  }
+}, heartbeatIntervalMs);
+heartbeatTimer.unref();
 
 type OperatorMessage =
   | { type: "gemini.connecting" }
@@ -198,6 +238,7 @@ viewerServer.on("connection", (socket, request) => {
     return;
   }
 
+  monitorHeartbeat(socket, { kind: "viewer", sessionId });
   publicSessions.subscribe(sessionId, socket);
   socket.on("close", () => publicSessions.unsubscribe(sessionId, socket));
   socket.on("error", () => publicSessions.unsubscribe(sessionId, socket));
@@ -274,6 +315,8 @@ audioServer.on("connection", (socket, request) => {
   let geminiCloseTimer: NodeJS.Timeout | undefined;
   const pendingAudio: Buffer[] = [];
   let pendingLiveTranslateAudio = Buffer.alloc(0);
+
+  monitorHeartbeat(socket, { kind: "producer", sessionId, connectionId });
 
   const sendToOperator = (message: OperatorMessage) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -901,6 +944,7 @@ function closeForShutdown(signal: "SIGINT" | "SIGTERM") {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`Received ${signal}; closing NerdLingo connections.`);
+  clearInterval(heartbeatTimer);
 
   for (const [sessionId, owner] of activeProducers) {
     releaseProducer(sessionId, owner.connectionId, `server.${signal}`);

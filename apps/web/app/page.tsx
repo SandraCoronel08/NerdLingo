@@ -282,7 +282,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
         }
       };
 
-      socket.onerror = () => failRun(run, "The WebSocket connection to the audio backend failed.");
+      socket.onerror = () => failRun(run, "Connection lost. Press Start to resume.");
       socket.onmessage = (event) => {
         if (!isActiveRun(run)) return;
         if (typeof event.data !== "string") return;
@@ -367,7 +367,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
         }
       };
       socket.onclose = (event) => {
-        if (event.code !== 1000) failRun(run, "The WebSocket connection was closed unexpectedly.");
+        if (event.code !== 1000) failRun(run, "Connection lost. Press Start to resume.");
       };
 
       socket.onopen = () => {
