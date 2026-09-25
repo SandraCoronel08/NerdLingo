@@ -2,7 +2,10 @@
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { backendWebSocketUrl } from "../lib/backend-url";
+import { DownloadTranscriptButton, Metric, StatusBadge, StorageBadge } from "../components/monitoring-ui";
+import { BrandHero, BrandMark } from "../components/brand-mark";
+import { backendHttpUrl, backendWebSocketUrl } from "../lib/backend-url";
+import { emptyStageMonitoring, firstCaptionLatency, type MonitorResponse, type StageMonitoring, timestamp } from "../lib/monitoring";
 
 type StreamStatus = "Idle" | "Requesting permission" | "Connecting" | "Streaming" | "Finishing transcription…" | "Stopped" | "Error";
 type GeminiStatus = "Not connected" | "Connecting" | "Connected" | "Error";
@@ -81,6 +84,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
   const [finalTranslations, setFinalTranslations] = useState<string[]>([]);
   const [translationError, setTranslationError] = useState<string | null>(null);
   const [capturePhase, setCapturePhase] = useState<CapturePhase>("idle");
+  const [stageHealth, setStageHealth] = useState<StageMonitoring>(() => emptyStageMonitoring(sessionId));
   const activeRunRef = useRef<CaptureRun | null>(null);
   const nextRunIdRef = useRef(0);
 
@@ -108,6 +112,24 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
       mediaDevices.removeEventListener("devicechange", onDeviceChange);
     };
   }, [refreshDevices]);
+
+  useEffect(() => {
+    let disposed = false;
+    const refreshHealth = async () => {
+      try {
+        const response = await fetch(backendHttpUrl("/monitor"), { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = await response.json() as MonitorResponse;
+        const stage = payload.stages?.find((candidate) => candidate.sessionId === sessionId);
+        if (!disposed && stage) setStageHealth(stage);
+      } catch {
+        // The operator console remains usable while monitoring is temporarily unavailable.
+      }
+    };
+    void refreshHealth();
+    const interval = window.setInterval(() => void refreshHealth(), 3_000);
+    return () => { disposed = true; window.clearInterval(interval); };
+  }, [sessionId]);
 
   const enableMicrophone = async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -424,20 +446,25 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
         : status === "Error"
           ? (error?.startsWith("Connection lost") ? "Connection lost" : "Offline")
           : status;
+  const consoleStatus = status === "Streaming" ? "live"
+    : status === "Connecting" || status === "Requesting permission" ? "connecting"
+      : status === "Finishing transcription…" ? "finishing"
+        : status === "Error" ? "error" : "ready";
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-3xl flex-col justify-center gap-6 px-6 py-16">
+    <main className="nerdlingo-shell mx-auto flex min-h-screen max-w-6xl flex-col gap-6 px-6 py-12 text-white">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-4xl font-semibold tracking-tight text-slate-950">NerdLingo</h1>
-          <p className="mt-4 text-lg text-slate-700">Open-source real-time captions for conferences.</p>
-          <p className="mt-2 text-sm font-semibold text-slate-700">Operator controls</p>
+          <BrandHero />
+          <div className="mt-5 flex items-center gap-3"><BrandMark dark compact /><span className="h-5 w-px bg-[#00ACA8]" /><span className="text-sm font-semibold uppercase tracking-[0.16em] text-[#D8E3E6]">{stageLabel}</span></div>
+          <h1 className="mt-3 text-4xl font-semibold tracking-tight text-white">Production Console</h1>
+          <p className="mt-2 text-[#D8E3E6]">Realtime captions and translation control.</p>
         </div>
-        <p className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white">{stageLabel}</p>
+        <StatusBadge status={consoleStatus} />
       </header>
-      <section className="space-y-4 rounded border border-slate-200 p-5">
+      <section className="nerdlingo-panel space-y-4 rounded-xl p-5">
         <div>
-          <p className="text-sm font-medium text-slate-600">Status</p>
+          <p className="text-sm font-medium text-slate-600">Session control</p>
           <p className="text-lg font-semibold">{operationalStatus}</p>
         </div>
         <label className="block text-sm text-slate-700">
@@ -476,16 +503,17 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
           Refresh audio inputs
         </button>
         <div className="flex gap-3">
-          <button className="rounded bg-slate-900 px-4 py-2 text-white disabled:opacity-50" onClick={() => void startAudio()} disabled={capturePhase !== "idle"}>
+          <button className="rounded-lg bg-[#FFBA00] px-4 py-2 font-semibold text-[#1A1A1A] shadow-[0_0_24px_rgb(255_186_0_/_18%)] transition hover:brightness-110 disabled:opacity-50" onClick={() => void startAudio()} disabled={capturePhase !== "idle"}>
             Start audio
           </button>
-          <button className="rounded border border-slate-300 px-4 py-2 disabled:opacity-50" onClick={() => stopAudio(liveTranslateDrainTimeoutMs)} disabled={capturePhase === "idle" || capturePhase === "stopping"}>
+          <button className="rounded border border-[#FF323C] px-4 py-2 text-[#B61F29] disabled:opacity-50" onClick={() => stopAudio(liveTranslateDrainTimeoutMs)} disabled={capturePhase === "idle" || capturePhase === "stopping"}>
             Stop audio
           </button>
         </div>
         {error ? <p className="text-sm text-red-700">{error}</p> : null}
-        <div className="text-sm text-slate-600">
-          <p className="font-medium text-slate-800">Technical metrics</p>
+        <details className="text-sm text-slate-600">
+          <summary className="cursor-pointer font-medium text-slate-800">Technical details</summary>
+          <div className="mt-3">
           <p>Format: mono PCM, signed 16-bit little-endian, 16 kHz.</p>
           <p>Target chunk: 40 ms (640 samples / 1,280 bytes).</p>
           <p>Chunks sent: {stats.chunksSent}</p>
@@ -510,27 +538,47 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
             <p>Interim translation: {stats.interimTranslationLatencyMs === null ? "—" : `${stats.interimTranslationLatencyMs} ms`}</p>
             <p>First chunk → interim translation: {stats.firstInterimTranslationLatencyMs === null ? "—" : `${stats.firstInterimTranslationLatencyMs} ms`}</p>
           </>}
-        </div>
+          </div>
+        </details>
       </section>
-      <section className="space-y-4 rounded border border-slate-200 p-5">
+      <section className="nerdlingo-panel rounded-xl border-l-4 border-l-[#00ACA8] p-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div><p className="text-sm font-medium text-slate-600">Stage health</p><p className="text-lg font-semibold">{stageLabel}</p></div>
+          <StatusBadge status={stageHealth.lastError ? "error" : stageHealth.status} />
+        </div>
+        <dl className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Metric label="Viewers" value={String(stageHealth.viewerCount)} featured />
+          <Metric label="First Original caption" value={firstCaptionLatency(stageHealth.firstOriginalLatencyMs)} featured />
+          <Metric label="First Spanish caption" value={firstCaptionLatency(stageHealth.firstSpanishLatencyMs)} featured />
+          <Metric label="Transcript storage" value={<StorageBadge status={stageHealth.transcript?.storageStatus ?? null} />} featured />
+        </dl>
+        <dl className="mt-5 grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+          <Metric label="Producer" value={stageHealth.producerConnected ? "Connected" : "Not connected"} />
+          <Metric label="Last Original update" value={timestamp(stageHealth.lastOriginalAt)} />
+          <Metric label="Last Spanish update" value={timestamp(stageHealth.lastSpanishAt)} />
+          <Metric label="Recent error" value={stageHealth.lastError ? <span className="text-red-700">{stageHealth.lastError.message}</span> : <span className="text-slate-500">✓ No recent errors</span>} />
+        </dl>
+        <div className="mt-4"><DownloadTranscriptButton stage={stageHealth} /></div>
+      </section>
+      <section className="nerdlingo-panel space-y-4 rounded-xl p-5">
         <div>
-          <p className="text-sm font-medium text-slate-600">{audioMode === "live-translate" ? "Gemini Live Translate" : "Legacy Transcription + Translation"}</p>
-          <p className="text-lg font-semibold">{geminiStatus}</p>
+          <p className="text-sm font-medium text-slate-600">Live captions</p>
+          <p className="text-lg font-semibold">{audioMode === "live-translate" ? "Gemini Live Translate" : "Legacy Transcription + Translation"} · {geminiStatus}</p>
         </div>
         <div className="grid gap-5 md:grid-cols-2">
-          <div>
+          <div className="rounded-lg border border-[#00ACA8]/45 bg-black/25 p-5 shadow-[inset_0_1px_0_rgb(255_255_255_/_5%)]">
             <p className="text-sm font-medium text-slate-600">Original</p>
             <p className="min-h-6 italic text-slate-600">{interimTranscript || "Waiting for speech..."}</p>
-            {finalTranscripts.length === 0 ? <p className="mt-2 text-slate-600">No final transcripts yet.</p> : null}
+            {audioMode === "legacy" && finalTranscripts.length === 0 ? <p className="mt-2 text-slate-600">No final transcripts yet.</p> : null}
             <ol className="mt-2 list-decimal space-y-1 pl-5">
               {finalTranscripts.map((transcript, index) => <li key={`${index}-${transcript}`}>{transcript}</li>)}
             </ol>
           </div>
-          <div>
+          <div className="rounded-lg border border-[#FFBA00]/45 bg-black/25 p-5 shadow-[inset_0_1px_0_rgb(255_255_255_/_5%)]">
             <p className="text-sm font-medium text-slate-600">Español</p>
             <p className="min-h-6 italic text-slate-600">{interimTranslation || "Waiting for translation..."}</p>
             {translationError ? <p className="mt-2 text-sm text-red-700">{translationError}</p> : null}
-            {finalTranslations.length === 0 ? <p className="mt-2 text-slate-600">No final translations yet.</p> : null}
+            {audioMode === "legacy" && finalTranslations.length === 0 ? <p className="mt-2 text-slate-600">No final translations yet.</p> : null}
             <ol className="mt-2 list-decimal space-y-1 pl-5">
               {finalTranslations.map((translation, index) => <li key={`${index}-${translation}`}>{translation}</li>)}
             </ol>

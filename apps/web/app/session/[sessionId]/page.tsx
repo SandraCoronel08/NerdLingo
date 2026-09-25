@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
+import { BrandMark } from "../../../components/brand-mark";
+import { StatusBadge } from "../../../components/monitoring-ui";
 import { backendWebSocketUrl } from "../../../lib/backend-url";
 
 type SessionId = "stage-1" | "stage-2";
@@ -70,39 +72,43 @@ function AudienceSessionView({ sessionId }: { sessionId: SessionId }) {
   const stageLabel = sessionId === "stage-1" ? "Stage 1" : "Stage 2";
 
   return (
-    <main className="min-h-screen bg-slate-950 px-5 py-8 text-white sm:px-8 sm:py-12">
+    <main className="nerdlingo-shell min-h-screen px-5 py-7 text-white sm:px-8 sm:py-10">
       <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-4xl flex-col">
-        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-700 pb-6">
+        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-white/15 pb-5">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-cyan-300">NerdLingo</p>
+            <BrandMark dark />
+            <div className="mt-4 flex items-center gap-2"><span className="h-px w-8 bg-[#00ACA8]" /><p className="text-xs font-bold uppercase tracking-[0.18em] text-[#D8E3E6]">Audience captions</p></div>
             <h1 className="mt-2 text-3xl font-semibold tracking-tight">{stageLabel}</h1>
           </div>
-          <p className={`rounded-full px-3 py-1 text-sm font-semibold ${state.status === "live" ? "bg-emerald-400 text-emerald-950" : "bg-slate-700 text-slate-100"}`}>
-            {state.status === "live" ? "Live" : "Offline"}
-          </p>
+          <StatusBadge status={state.status} />
         </header>
 
-        <nav className="mt-5 flex flex-wrap gap-3" aria-label="Session selector">
-          <Link className={`rounded-lg px-4 py-3 font-semibold ${sessionId === "stage-1" ? "bg-cyan-300 text-slate-950" : "bg-slate-800 text-white"}`} href="/session/stage-1">Stage 1</Link>
-          <Link className={`rounded-lg px-4 py-3 font-semibold ${sessionId === "stage-2" ? "bg-cyan-300 text-slate-950" : "bg-slate-800 text-white"}`} href="/session/stage-2">Stage 2</Link>
-          <Link className="px-4 py-3 font-semibold text-cyan-300 underline" href="/session">All sessions</Link>
+        <nav className="mt-5 flex flex-wrap gap-2" aria-label="Session selector">
+          <Link className={`rounded-lg border px-4 py-2.5 font-semibold transition focus:outline-none focus:ring-2 focus:ring-[#FFBA00] ${sessionId === "stage-1" ? "border-[#00ACA8] bg-[#00ACA8] text-[#1A1A1A]" : "border-white/15 bg-white/5 text-white hover:border-[#00ACA8]"}`} href="/session/stage-1">Stage 1</Link>
+          <Link className={`rounded-lg border px-4 py-2.5 font-semibold transition focus:outline-none focus:ring-2 focus:ring-[#FFBA00] ${sessionId === "stage-2" ? "border-[#00ACA8] bg-[#00ACA8] text-[#1A1A1A]" : "border-white/15 bg-white/5 text-white hover:border-[#00ACA8]"}`} href="/session/stage-2">Stage 2</Link>
+          <Link className="rounded-lg px-4 py-2.5 font-semibold text-[#FFBA00] underline-offset-4 hover:underline focus:outline-none focus:ring-2 focus:ring-[#FFBA00]" href="/session">All sessions</Link>
         </nav>
 
-        <section className="mt-6 flex gap-3" aria-label="Caption language">
-          <button aria-pressed={language === "original"} className={`min-h-12 rounded-lg px-5 font-semibold ${language === "original" ? "bg-white text-slate-950" : "bg-slate-800 text-white"}`} onClick={() => setLanguage("original")}>
+        <section className="mt-5 inline-flex w-fit rounded-xl border border-white/15 bg-black/25 p-1.5" aria-label="Caption language">
+          <button aria-pressed={language === "original"} className={`min-h-11 rounded-lg px-4 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-[#FFBA00] ${language === "original" ? "bg-[#FFBA00] text-[#1A1A1A]" : "text-[#D8E3E6] hover:bg-white/10"}`} onClick={() => setLanguage("original")}>
             Original (English)
           </button>
-          <button aria-pressed={language === "spanish"} className={`min-h-12 rounded-lg px-5 font-semibold ${language === "spanish" ? "bg-white text-slate-950" : "bg-slate-800 text-white"}`} onClick={() => setLanguage("spanish")}>
+          <button aria-pressed={language === "spanish"} className={`min-h-11 rounded-lg px-4 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-[#FFBA00] ${language === "spanish" ? "bg-[#FFBA00] text-[#1A1A1A]" : "text-[#D8E3E6] hover:bg-white/10"}`} onClick={() => setLanguage("spanish")}>
             Español
           </button>
         </section>
 
-        <section className="mt-8 flex flex-1 items-center rounded-3xl border border-slate-700 bg-slate-900 p-7 shadow-2xl sm:p-12" aria-live="polite" aria-label="Live captions">
-          <p className="w-full text-3xl font-medium leading-relaxed tracking-tight text-white sm:text-5xl sm:leading-snug">
-            {caption || (state.status === "live" ? "Listening for captions…" : "This session is offline.")}
-          </p>
+        <section className="nerdlingo-panel mt-6 flex flex-1 items-center rounded-3xl border-l-4 border-l-[#00ACA8] p-7 shadow-2xl sm:mt-8 sm:p-12" aria-live="polite" aria-label="Live captions">
+          {caption || state.status === "live" ? <p className="w-full text-3xl font-medium leading-relaxed tracking-tight text-white sm:text-5xl sm:leading-snug">
+            {caption || "Listening for captions…"}
+          </p> : <div className="mx-auto flex max-w-md flex-col items-center text-center">
+            <BrandMark dark compact />
+            <StatusBadge status="offline" />
+            <p className="mt-5 text-2xl font-semibold">This session is offline</p>
+            <p className="mt-2 leading-7 text-[#D8E3E6]">Captions will appear here when the stage goes live.</p>
+          </div>}
         </section>
-        <p className="mt-5 text-center text-sm text-slate-400">{connected ? "Connected" : "Reconnecting…"}</p>
+        <p className="mt-4 text-center text-sm text-[#9FB3B7]">{connected ? "Connected" : "Reconnecting…"}</p>
       </div>
     </main>
   );
