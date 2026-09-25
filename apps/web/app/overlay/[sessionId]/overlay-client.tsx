@@ -115,7 +115,7 @@ export default function OverlayClient({ sessionId, language }: { sessionId: Sess
   };
 
   return (
-    <main className="flex min-h-screen items-end justify-center bg-transparent px-[5vw] pb-[8vh] pt-[30vh] text-center text-white" aria-live="polite" aria-label="Live captions overlay">
+    <main className="nerdlingo-overlay flex min-h-screen items-end justify-center bg-transparent px-[5vw] pb-[8vh] pt-[30vh] text-center text-white" aria-live="polite" aria-label="Live captions overlay">
       {lines.top ? (
         <div className="w-[86vw] max-w-[1500px] overflow-hidden rounded-lg bg-black/55 px-5 py-2 shadow-[0_2px_8px_rgb(0_0_0_/_0.95)] sm:px-6">
           <div className="text-[clamp(1.75rem,2.2vw,2.625rem)] font-semibold leading-[1.2] tracking-tight">
