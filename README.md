@@ -28,6 +28,7 @@ The browser captures the selected operating-system audio input through `getUserM
 - Operator UI with input guidance, operational status, technical metrics, and graceful Stop/drain.
 - Audience pages with stage selection and an Original / Español toggle.
 - Mobile-friendly audience UI and WebSocket text fan-out to multiple viewers.
+- Transparent live-caption overlay for OBS and vMix Browser/Web inputs.
 - Viewer reconnection, WebSocket heartbeat, and graceful server shutdown.
 - Render backend and Vercel frontend deployments.
 - `GET /health` health endpoint.
@@ -230,6 +231,28 @@ Audience members can:
 
 The audience UI is mobile-friendly, and viewers do not create Gemini sessions.
 
+## Streaming Overlay
+
+The live-caption overlay is a transparent browser page intended for OBS Browser sources and vMix Web Browser inputs. It consumes the existing viewer WebSocket fan-out, so it does not create another Gemini session or another audio pipeline.
+
+Available routes:
+
+```text
+/overlay/stage-1?lang=es
+/overlay/stage-1?lang=original
+/overlay/stage-2?lang=es
+/overlay/stage-2?lang=original
+```
+
+Use `lang=es` for Spanish captions or `lang=original` for the original transcription. The overlay displays a short, recent caption window rather than the complete transcript, keeping the newest spoken text readable for burn-in.
+
+```text
+OBS:  Sources → Browser → overlay URL
+vMix: Add Input → Web Browser → overlay URL
+```
+
+NerdLingo does not use an OBS or vMix-specific API; both tools load the overlay as a regular browser page.
+
 ## Validation
 
 Development validation has included:
@@ -251,13 +274,12 @@ Long-form technical English containing terms such as GPL, WordPress, PHP, BSD, M
 - Technical proper names can still be misrecognized.
 - Gemini Live Translate is preview technology.
 - The production path currently validated is English → Spanish.
-- SRT/VTT export, OBS/vMix overlay, and a monitoring dashboard are not implemented yet.
+- SRT/VTT export and a monitoring dashboard are not implemented yet.
 
 ## Roadmap
 
 Planned improvements:
 
-- OBS/vMix browser overlay.
 - More languages, including Portuguese.
 - Technical glossary and proper-name context.
 - TXT/SRT/VTT transcript export.
