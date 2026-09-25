@@ -1,6 +1,6 @@
 const localBackendUrl = "http://localhost:3001";
 
-export function backendHttpUrl(pathname: "/monitor") {
+export function backendHttpUrl(pathname: "/monitor" | "/transcript/stage-1" | "/transcript/stage-2") {
   const url = new URL(process.env.NEXT_PUBLIC_BACKEND_URL || localBackendUrl);
   url.pathname = pathname;
   url.search = "";

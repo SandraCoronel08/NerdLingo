@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { GoogleGenAI, Modality, ThinkingLevel, type Session } from "@google/genai";
 import { WebSocket, WebSocketServer } from "ws";
 import { PublicSessionState } from "./public-session-state.js";
+import { TranscriptStore, createGcsTranscriptStorageFromEnv, renderTranscriptTxt } from "./transcript-store.js";
 
 for (const envPath of [resolve(process.cwd(), ".env"), resolve(process.cwd(), "..", "..", ".env")]) {
   if (existsSync(envPath)) {
@@ -37,6 +38,10 @@ type ProducerOwner = {
 
 const activeProducers = new Map<string, ProducerOwner>();
 const publicSessions = new PublicSessionState(allowedSessionIds);
+const transcriptRuns = new TranscriptStore({
+  storage: createGcsTranscriptStorageFromEnv(process.env),
+  onStorageFailure: (sessionId) => publicSessions.setError(sessionId, "Transcript storage failed; the in-memory export remains available."),
+});
 type HeartbeatConnection = {
   kind: "producer" | "viewer";
   sessionId: string;
@@ -203,18 +208,48 @@ function sessionIdFromUrl(url: string | undefined) {
 }
 
 const server = createServer((request, response) => {
-  if (request.method === "GET" && request.url === "/monitor") {
+  const requestUrl = new URL(request.url ?? "/", "http://localhost");
+
+  if (request.method === "GET" && requestUrl.pathname === "/monitor") {
     const stages = allowedSessionIds.map((sessionId) => {
       const producer = activeProducers.get(sessionId);
       const producerConnected = producer?.socket.readyState === WebSocket.OPEN || producer?.socket.readyState === WebSocket.CONNECTING;
-      return { ...publicSessions.monitoring(sessionId), producerConnected };
+      return { ...publicSessions.monitoring(sessionId), producerConnected, transcript: transcriptRuns.monitoring(sessionId) };
     });
     response.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" });
     response.end(JSON.stringify({ generatedAt: Date.now(), stages }));
     return;
   }
 
-  if (request.method === "GET" && request.url === "/health") {
+  if (request.method === "GET" && requestUrl.pathname.startsWith("/transcript/")) {
+    const sessionId = requestUrl.pathname.slice("/transcript/".length);
+    if (!allowedSessionIdSet.has(sessionId)) {
+      response.writeHead(404, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "Transcript session not found" }));
+      return;
+    }
+    const format = requestUrl.searchParams.get("format") ?? "txt";
+    if (format !== "txt") {
+      response.writeHead(400, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "Unsupported transcript format" }));
+      return;
+    }
+    const run = transcriptRuns.latest(sessionId);
+    if (!run || (!run.originalText && !run.spanishText)) {
+      response.writeHead(404, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "No transcript is available for this session" }));
+      return;
+    }
+    response.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Disposition": `attachment; filename=\"nerdlingo-${sessionId}-transcript.txt\"`,
+      "Cache-Control": "no-store",
+    });
+    response.end(renderTranscriptTxt(run));
+    return;
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/health") {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ status: "ok", service: "nerdlingo-server" }));
     return;
@@ -338,6 +373,7 @@ audioServer.on("connection", (socket, request) => {
     }
     if (message.type === "transcript.interim" || message.type === "transcript.final") {
       publicSessions.setOriginal(sessionId, message.text, message.firstChunkLatencyMs);
+      if (message.type === "transcript.final") transcriptRuns.appendOriginal(sessionId, message.text);
     }
     if (message.type === "liveTranslate.output") {
       publicSessions.setSpanish(sessionId, message.text, message.firstAudioLatencyMs);
@@ -347,8 +383,11 @@ audioServer.on("connection", (socket, request) => {
     }
     if (message.type === "translation.final") {
       publicSessions.setSpanish(sessionId, message.text);
+      transcriptRuns.appendSpanish(sessionId, message.text);
     }
   };
+
+  const finishTranscriptRun = (endedAt = Date.now()) => transcriptRuns.finish(sessionId, endedAt);
 
   const finalizeLiveTranslateInput = (now = Date.now()) => {
     if (!liveTranslateInputBuffer) return;
@@ -377,6 +416,7 @@ audioServer.on("connection", (socket, request) => {
     finalizeLiveTranslateOutput(now);
     if (!audioInputStopped || liveTranslateDrainCompleteSent) return;
     liveTranslateDrainCompleteSent = true;
+    finishTranscriptRun(now);
     sendToOperator({ type: "liveTranslate.drain.complete" });
   };
 
@@ -532,6 +572,7 @@ audioServer.on("connection", (socket, request) => {
     audioInputStopped = true;
     releaseProducer(sessionId, connectionId, reason);
     closeGeminiSession();
+    finishTranscriptRun();
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close(1011, reason);
   };
 
@@ -582,6 +623,7 @@ audioServer.on("connection", (socket, request) => {
             inputTranscriptEventCount += 1;
             console.log(`[audio ${id}] Live Translate input final`, { text: JSON.stringify(inputFinal.text), finished: inputFinal.finished ?? true, turnComplete: content.turnComplete ?? false, generationComplete: content.generationComplete ?? false, interrupted: content.interrupted ?? false });
             liveTranslateInputBuffer = appendTranscriptDelta(liveTranslateInputBuffer, inputFinal.text);
+            transcriptRuns.appendOriginal(sessionId, inputFinal.text);
             sendToOperator({ type: "liveTranslate.input", text: liveTranslateInputBuffer, finished: false, firstAudioLatencyMs: firstAudioSentToLiveTranslateAt ? now - firstAudioSentToLiveTranslateAt : null });
           }
           if (output?.text) {
@@ -589,6 +631,7 @@ audioServer.on("connection", (socket, request) => {
             outputTranscriptEventCount += 1;
             console.log(`[audio ${id}] Live Translate output`, { text: JSON.stringify(output.text), finished: output.finished ?? false, turnComplete: content.turnComplete ?? false, generationComplete: content.generationComplete ?? false, interrupted: content.interrupted ?? false });
             liveTranslateOutputBuffer = appendTranscriptDelta(liveTranslateOutputBuffer, output.text);
+            transcriptRuns.appendSpanish(sessionId, output.text);
             sendToOperator({ type: "liveTranslate.output", text: liveTranslateOutputBuffer, finished: false, firstAudioLatencyMs: firstAudioSentToLiveTranslateAt ? now - firstAudioSentToLiveTranslateAt : null });
             if (output.finished) finalizeLiveTranslateOutput(now);
           }
@@ -866,8 +909,9 @@ audioServer.on("connection", (socket, request) => {
           const reservedAt = Date.now();
           activeProducers.set(sessionId, { connectionId, socket, reservedAt });
           console.log(`[${sessionId}] producer reserved`, { connectionId, reservedAt: new Date(reservedAt).toISOString() });
-          publicSessions.beginRun(sessionId);
           audioStartAt ??= Date.now();
+          publicSessions.beginRun(sessionId);
+          transcriptRuns.start(sessionId, audioStartAt);
           audioMode = control.mode === "live-translate" ? "live-translate" : "legacy";
           console.log(`[audio ${id}] control: audio.start`);
           void openGeminiSession().catch(() => {
@@ -926,6 +970,7 @@ audioServer.on("connection", (socket, request) => {
     pendingInterimTranslation = undefined;
     if (interimTranslationTimer) clearTimeout(interimTranslationTimer);
     closeGeminiSession();
+    finishTranscriptRun();
     console.log(`[audio ${id}] connection closed`, {
       sessionId,
       audioMode,
@@ -993,6 +1038,7 @@ function closeForShutdown(signal: "SIGINT" | "SIGTERM") {
 
   for (const [sessionId, owner] of activeProducers) {
     releaseProducer(sessionId, owner.connectionId, `server.${signal}`);
+    transcriptRuns.finish(sessionId);
   }
   for (const client of audioServer.clients) client.close(1001, "Server shutting down");
   for (const client of viewerServer.clients) client.close(1001, "Server shutting down");

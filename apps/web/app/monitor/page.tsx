@@ -15,6 +15,7 @@ type StageMonitoring = {
   firstOriginalLatencyMs: number | null;
   firstSpanishLatencyMs: number | null;
   lastError: { message: string; at: number } | null;
+  transcript: { available: boolean; storageStatus: "pending" | "stored" | "memory-only" | "failed" | null };
 };
 
 type MonitorResponse = { generatedAt: number; stages: StageMonitoring[] };
@@ -31,6 +32,7 @@ const initialStages: StageMonitoring[] = sessionIds.map((sessionId) => ({
   firstOriginalLatencyMs: null,
   firstSpanishLatencyMs: null,
   lastError: null,
+  transcript: { available: false, storageStatus: null },
 }));
 
 function timestamp(value: number | null) {
@@ -39,6 +41,18 @@ function timestamp(value: number | null) {
 
 function latency(value: number | null) {
   return value === null ? "Not available" : `${value} ms`;
+}
+
+function transcriptUrl(sessionId: SessionId) {
+  return backendHttpUrl(`/transcript/${sessionId}`);
+}
+
+function storageStatus(value: StageMonitoring["transcript"]["storageStatus"]) {
+  if (value === "stored") return "Stored";
+  if (value === "memory-only") return "Memory only";
+  if (value === "failed") return "Failed";
+  if (value === "pending") return "Saving…";
+  return "Not available";
 }
 
 export default function MonitorPage() {
@@ -103,7 +117,14 @@ export default function MonitorPage() {
               <Metric label="Spanish update" value={timestamp(stage.lastSpanishAt)} />
               <Metric label="First original latency" value={latency(stage.firstOriginalLatencyMs)} />
               <Metric label="First Spanish latency" value={latency(stage.firstSpanishLatencyMs)} />
+              <Metric label="Transcript storage" value={storageStatus(stage.transcript?.storageStatus ?? null)} />
             </dl>
+
+            <div className="mt-6">
+              {stage.transcript?.available ? <a className="inline-flex rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white" href={`${transcriptUrl(stage.sessionId)}?format=txt`}>
+                Download TXT
+              </a> : <span className="inline-flex rounded-lg bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-500">No transcript yet</span>}
+            </div>
 
             {stage.lastError ? <div className="mt-6 rounded-lg border border-red-200 bg-white/70 p-4 text-sm text-red-900">
               <p className="font-semibold">Recent error</p>

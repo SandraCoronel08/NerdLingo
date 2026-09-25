@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@google-cloud/storage": "^8.2.0",
     "@google/genai": "2.24.0",
     "ws": "^8.18.0"
   },

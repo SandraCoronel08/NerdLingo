@@ -30,6 +30,7 @@ The browser captures the selected operating-system audio input through `getUserM
 - Mobile-friendly audience UI and WebSocket text fan-out to multiple viewers.
 - Transparent live-caption overlay for OBS and vMix Browser/Web inputs.
 - Production monitoring dashboard for Stage 1 and Stage 2.
+- Per-stage TXT transcript export after a run closes.
 - Viewer reconnection, WebSocket heartbeat, and graceful server shutdown.
 - Render backend and Vercel frontend deployments.
 - `GET /health` health endpoint.
@@ -154,6 +155,14 @@ The public `/monitor` dashboard refreshes every 3 seconds and shows the operatio
 
 These are first-caption measurements, not continuous end-to-end latency metrics. Monitoring state is in memory in this MVP. The dashboard exposes no API keys, audio, stack traces, or internal connection IDs.
 
+## Transcript Export
+
+Each closed Stage 1 or Stage 2 run produces an isolated UTF-8 TXT transcript with Original and Español text. The latest closed run can be downloaded from `/monitor`; it remains available after **Stop** and is not affected by audience disconnects.
+
+Google Cloud Storage persistence is optional and server-side. When configured, the backend uploads the TXT only after a run closes to a private bucket. Realtime captions continue if storage is unavailable or an upload fails, with the completed transcript retained in memory for download.
+
+VTT and SRT are intentionally not generated: current Gemini Live events provide model-event arrival times, not reliable audio-alignment timestamps. NerdLingo avoids fabricating subtitle timing.
+
 ## Local Development
 
 ### Prerequisites
@@ -196,6 +205,9 @@ The default backend health check is <http://localhost:3001/health>.
 | Variable | Used by | Purpose |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | Server only | Authenticates Gemini Live sessions. |
+| `GCS_PROJECT_ID` | Server only | Optional Google Cloud project for transcript persistence. |
+| `GCS_BUCKET_NAME` | Server only | Optional private bucket for closed TXT transcripts. |
+| `GCS_SERVICE_ACCOUNT_JSON` | Server only | Optional service-account JSON for Cloud Storage; never expose it to the browser. |
 | `NEXT_PUBLIC_BACKEND_URL` | Web build | Public backend origin; local fallback is `http://localhost:3001`. |
 | `PORT` | Server | Optional local HTTP/WebSocket port; defaults to `3001`. |
 
@@ -288,7 +300,7 @@ Long-form technical English containing terms such as GPL, WordPress, PHP, BSD, M
 - Technical proper names can still be misrecognized.
 - Gemini Live Translate is preview technology.
 - The production path currently validated is English → Spanish.
-- SRT/VTT export is not implemented yet.
+- VTT/SRT are intentionally deferred until reliable audio-alignment timestamps exist.
 
 ## Roadmap
 
@@ -296,7 +308,7 @@ Planned improvements:
 
 - More languages, including Portuguese.
 - Technical glossary and proper-name context.
-- TXT/SRT/VTT transcript export.
+- Audio-aligned VTT/SRT export when reliable audio timestamps are available.
 - QR-based audience access.
 - Optional Cloud Run deployment.
 
