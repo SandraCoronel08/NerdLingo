@@ -111,7 +111,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
 
   const enableMicrophone = async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
-      setError("This browser does not support microphone access.");
+      setError("This browser does not support audio input access.");
       return;
     }
     setError(null);
@@ -122,11 +122,11 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
       await refreshDevices();
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "NotAllowedError") {
-        setError("Microphone permission was denied.");
+        setError("Audio input permission was denied.");
       } else if (cause instanceof DOMException && cause.name === "NotFoundError") {
-        setError("No microphone was found.");
+        setError("No audio input was found.");
       } else {
-        setError(cause instanceof Error ? cause.message : "Unable to enable microphone access.");
+        setError(cause instanceof Error ? cause.message : "Unable to enable audio inputs.");
       }
     } finally {
       temporaryStream?.getTracks().forEach((track) => track.stop());
@@ -196,7 +196,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
 
   const startAudio = async () => {
     if (!navigator.mediaDevices?.getUserMedia || !window.AudioContext) {
-      setError("This browser does not support microphone capture with the Web Audio API.");
+      setError("This browser does not support audio input capture with the Web Audio API.");
       setStatus("Error");
       return;
     }
@@ -403,7 +403,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
     } catch (cause) {
       if (!isCurrentRun(run)) return;
       if (cause instanceof DOMException && cause.name === "NotAllowedError") {
-        failRun(run, "Microphone permission was denied. Allow access and try again.");
+        failRun(run, "Audio input permission was denied. Allow access and try again.");
       } else if (cause instanceof DOMException && cause.name === "NotFoundError") {
         failRun(run, "No usable audio input device was found.");
       } else {
@@ -414,16 +414,31 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
 
   const audioSeconds = stats.bytesSent / (16_000 * 2);
   const needsMicrophoneDiscovery = devices.length === 0 || devices.every((device) => !device.label || device.label.toLowerCase() === "default");
+  const stageLabel = sessionId === "stage-1" ? "Stage 1" : "Stage 2";
+  const operationalStatus = status === "Idle"
+    ? "Ready"
+    : status === "Streaming"
+      ? "Live"
+      : status === "Connecting"
+        ? "Connecting…"
+        : status === "Error"
+          ? (error?.startsWith("Connection lost") ? "Connection lost" : "Offline")
+          : status;
 
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col justify-center gap-6 px-6 py-16">
-      <h1 className="text-4xl font-semibold tracking-tight text-slate-950">NerdLingo</h1>
-      <p className="mt-4 text-lg text-slate-700">Open-source real-time captions for conferences.</p>
-      <p className="text-sm font-semibold text-slate-700">Operator session: {sessionId}</p>
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-4xl font-semibold tracking-tight text-slate-950">NerdLingo</h1>
+          <p className="mt-4 text-lg text-slate-700">Open-source real-time captions for conferences.</p>
+          <p className="mt-2 text-sm font-semibold text-slate-700">Operator controls</p>
+        </div>
+        <p className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white">{stageLabel}</p>
+      </header>
       <section className="space-y-4 rounded border border-slate-200 p-5">
         <div>
           <p className="text-sm font-medium text-slate-600">Status</p>
-          <p className="text-lg font-semibold">{status}</p>
+          <p className="text-lg font-semibold">{operationalStatus}</p>
         </div>
         <label className="block text-sm text-slate-700">
           Audio input
@@ -442,8 +457,9 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
           </select>
         </label>
         {needsMicrophoneDiscovery ? <button className="text-left text-sm text-slate-700 underline" onClick={() => void enableMicrophone()} disabled={capturePhase !== "idle"}>
-          Enable microphone
+          Enable audio inputs
         </button> : null}
+        <p className="text-sm text-slate-600">Select the input connected to your microphone, audio interface, Line In, USB Audio, or mixing console.</p>
         <label className="block text-sm text-slate-700">
           Processing mode
           <select
@@ -469,6 +485,7 @@ function OperatorSession({ sessionId }: { sessionId: SessionId }) {
         </div>
         {error ? <p className="text-sm text-red-700">{error}</p> : null}
         <div className="text-sm text-slate-600">
+          <p className="font-medium text-slate-800">Technical metrics</p>
           <p>Format: mono PCM, signed 16-bit little-endian, 16 kHz.</p>
           <p>Target chunk: 40 ms (640 samples / 1,280 bytes).</p>
           <p>Chunks sent: {stats.chunksSent}</p>
